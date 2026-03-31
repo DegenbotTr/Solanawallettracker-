@@ -145,7 +145,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     const hours = Math.floor(uptimeMs / 3600000);
     const minutes = Math.floor((uptimeMs % 3600000) / 60000);
 
-    const lines = [
+    return [
       `┌─────────────────────────────`,
       `│ 📊 <b>BOT STATS</b>`,
       `└─────────────────────────────\n`,
@@ -153,27 +153,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       `👁 Active watchers: <b>${activeWatchers.size}</b>`,
       `👛 Wallets being tracked: <b>${totalWallets}</b>`,
       `⏱ Uptime: <b>${hours}h ${minutes}m</b>`,
-      `\n<b>Recent Users:</b>`,
-    ];
-
-    // Show last 10 users
-    const recent = [...allUsers.entries()]
-      .sort((a, b) => b[1].lastSeen.getTime() - a[1].lastSeen.getTime())
-      .slice(0, 10);
-
-    for (const [chatId, info] of recent) {
-      const walletCount = this.getWatchedWallets(chatId).length;
-      const name = info.username ? `@${info.username}` : `User ${chatId}`;
-      const last = info.lastSeen.toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-      lines.push(`• ${name}  ·  ${walletCount} wallet(s)  ·  ${last}`);
-    }
-
-    return lines.join('\n');
+    ].join('\n');
   }
 
   // ─── Portfolio ───────────────────────────────────────────────────────────────
@@ -226,7 +206,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     const solUsd = solBalance * solPrice;
 
     const tokens = items.filter(
-      (i) => i.interface === 'FungibleToken' && i.token_info?.balance > 0,
+      (i) =>
+        (i.interface === 'FungibleToken' || i.interface === 'FungibleAsset') &&
+        (i.token_info?.balance ?? 0) > 0,
     );
 
     let totalUsd = solUsd;
