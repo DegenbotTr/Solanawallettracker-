@@ -20,6 +20,7 @@ const web3_js_1 = require("@solana/web3.js");
 const nestjs_telegraf_1 = require("nestjs-telegraf");
 const telegraf_1 = require("telegraf");
 const minTradeSize = new Map();
+const walletLabels = new Map();
 const allUsers = new Map();
 const startTime = new Date();
 let SolanaService = SolanaService_1 = class SolanaService {
@@ -108,11 +109,59 @@ let SolanaService = SolanaService_1 = class SolanaService {
     }
     getWatchedWallets(chatId) {
         const result = [];
+        const labels = walletLabels.get(chatId) ?? new Map();
         this.watchedWallets.forEach((entry, address) => {
-            if (entry.chatIds.has(chatId))
-                result.push(address);
+            if (entry.chatIds.has(chatId)) {
+                result.push({ address, label: labels.get(address) ?? '' });
+            }
         });
         return result;
+    }
+    setWalletLabel(chatId, address, label) {
+        const entry = this.watchedWallets.get(address);
+        if (!entry || !entry.chatIds.has(chatId))
+            return false;
+        if (!walletLabels.has(chatId))
+            walletLabels.set(chatId, new Map());
+        walletLabels.get(chatId).set(address, label);
+        return true;
+    }
+    getWalletLabel(chatId, address) {
+        return walletLabels.get(chatId)?.get(address) ?? '';
+    }
+    detectChain(address) {
+        const trimmed = address.trim();
+        if (/^0x[a-fA-F0-9]{40}$/.test(trimmed))
+            return 'ethereum';
+        if (/^(1|3)[a-zA-Z0-9]{25,34}$/.test(trimmed) ||
+            /^bc1[a-zA-Z0-9]{6,87}$/.test(trimmed))
+            return 'bitcoin';
+        if (/^T[a-zA-Z0-9]{33}$/.test(trimmed))
+            return 'tron';
+        if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
+            try {
+                new web3_js_1.PublicKey(trimmed);
+                return 'solana';
+            }
+            catch {
+            }
+        }
+        return 'unknown';
+    }
+    chainErrorMessage(address) {
+        const chain = this.detectChain(address);
+        if (chain === 'solana')
+            return null;
+        const chainNames = {
+            ethereum: '⟠ Ethereum / EVM (MetaMask address)',
+            bitcoin: '₿ Bitcoin',
+            tron: '🔺 Tron',
+        };
+        const detected = chainNames[chain] ?? '❓ Unknown chain';
+        return (`⛔ <b>That's not a Solana wallet</b>\n\n` +
+            `Detected: <b>${detected}</b>\n\n` +
+            `This bot only supports <b>Solana</b> wallets.\n` +
+            `Solana addresses look like:\n<code>EizqmoCSovbTzuSnmxkdaJwLBBZgyB2GyjN3m3uJWXpZ</code>`);
     }
     setMinTradeSize(chatId, usd) {
         minTradeSize.set(chatId, usd);
@@ -389,9 +438,46 @@ let SolanaService = SolanaService_1 = class SolanaService {
                 const min = minTradeSize.get(chatId) ?? 0;
                 if (action.usdValue < min)
                     return;
-                const message = this.formatTradeMessage(walletAddress, signature, action);
+                const label = this.getWalletLabel(chatId, walletAddress);
+                const message = this.formatTradeMessage(walletAddress, signature, action, label);
                 this.bot.telegram
-                    .sendMessage(chatId, message, { parse_mode: 'HTML' })
+                    .sendMessage(chatId, message, {
+                    parse_mode: 'HTML',
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                {
+                                    text: '💼 Portfolio',
+                                    callback_data: `wallet_portfolio:${walletAddress}`,
+                                },
+                                {
+                                    text: '📜 TX History',
+                                    callback_data: `wallet_txhistory:${walletAddress}`,
+                                },
+                            ],
+                            ...(action.tokenMint
+                                ? [
+                                    [
+                                        {
+                                            text: '📈 Chart',
+                                            url: `https://dexscreener.com/solana/${action.tokenMint}`,
+                                        },
+                                        {
+                                            text: '🪙 Token',
+                                            url: `https://solscan.io/token/${action.tokenMint}`,
+                                        },
+                                    ],
+                                ]
+                                : []),
+                            [
+                                {
+                                    text: '👛 Wallet',
+                                    url: `https://solscan.io/account/${walletAddress}`,
+                                },
+                            ],
+                        ],
+                    },
+                })
                     .catch((err) => {
                     this.logger.error(`Failed to send to ${chatId}: ${err.message}`);
                 });
@@ -445,10 +531,10 @@ let SolanaService = SolanaService_1 = class SolanaService {
             usdValue: 0,
         };
     }
-    formatTradeMessage(walletAddress, signature, action) {
+    formatTradeMessage(walletAddress, signature, action, label) {
         const isBuy = action.type === 'BUY';
         const emoji = isBuy ? '🟢' : '🔴';
-        const label = isBuy ? '🟢 BUY' : '🔴 SELL';
+        const labelLine = label ? `🏷 <b>${label}</b>\n` : '';
         const short = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
         const usdLine = action.usdValue > 0
             ? `💵 Value: <b>~$${action.usdValue.toFixed(2)}</b>\n`
@@ -462,8 +548,9 @@ let SolanaService = SolanaService_1 = class SolanaService {
         const links = action.tokenMint
             ? `🔗 <a href="https://dexscreener.com/solana/${action.tokenMint}">Chart</a>  ·  <a href="https://solscan.io/token/${action.tokenMint}">Token</a>  ·  <a href="https://solscan.io/tx/${signature}">TX</a>`
             : `🔗 <a href="https://solscan.io/tx/${signature}">View Transaction</a>`;
-        return (`${emoji} <b>${label}</b>\n` +
+        return (`${emoji} <b>${isBuy ? '🟢 BUY' : '🔴 SELL'}</b>\n` +
             `━━━━━━━━━━━━━━━━━━━━\n` +
+            labelLine +
             `👛 <a href="https://solscan.io/account/${walletAddress}">${short}</a>\n` +
             `🏷 Token: <b>${action.tokenSymbol}</b>\n` +
             tokenAmountLine +

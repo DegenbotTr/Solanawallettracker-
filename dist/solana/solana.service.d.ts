@@ -14,7 +14,14 @@ export declare class SolanaService implements OnModuleInit, OnModuleDestroy {
     validateWallet(address: string): Promise<'valid' | 'invalid_address' | 'not_wallet'>;
     watchWallet(address: string, chatId: number | null): Promise<boolean>;
     unwatchWallet(address: string, chatId: number): boolean;
-    getWatchedWallets(chatId: number): string[];
+    getWatchedWallets(chatId: number): {
+        address: string;
+        label: string;
+    }[];
+    setWalletLabel(chatId: number, address: string, label: string): boolean;
+    getWalletLabel(chatId: number, address: string): string;
+    detectChain(address: string): 'solana' | 'ethereum' | 'bitcoin' | 'tron' | 'bnb' | 'unknown';
+    chainErrorMessage(address: string): string | null;
     setMinTradeSize(chatId: number, usd: number): void;
     getMinTradeSize(chatId: number): number;
     trackUser(chatId: number, username: string): void;

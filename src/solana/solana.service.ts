@@ -16,6 +16,9 @@ import { Telegraf } from 'telegraf';
 // Per-chat min trade size filter (USD), default 0 = all trades
 const minTradeSize = new Map<number, number>();
 
+// Per-user wallet labels: chatId -> { address -> label }
+const walletLabels = new Map<number, Map<string, string>>();
+
 // Track all users who have interacted with the bot
 const allUsers = new Map<
   number,
@@ -133,12 +136,79 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
-  getWatchedWallets(chatId: number): string[] {
-    const result: string[] = [];
+  getWatchedWallets(chatId: number): { address: string; label: string }[] {
+    const result: { address: string; label: string }[] = [];
+    const labels = walletLabels.get(chatId) ?? new Map();
     this.watchedWallets.forEach((entry, address) => {
-      if (entry.chatIds.has(chatId)) result.push(address);
+      if (entry.chatIds.has(chatId)) {
+        result.push({ address, label: labels.get(address) ?? '' });
+      }
     });
     return result;
+  }
+
+  setWalletLabel(chatId: number, address: string, label: string): boolean {
+    const entry = this.watchedWallets.get(address);
+    if (!entry || !entry.chatIds.has(chatId)) return false;
+    if (!walletLabels.has(chatId)) walletLabels.set(chatId, new Map());
+    walletLabels.get(chatId).set(address, label);
+    return true;
+  }
+
+  getWalletLabel(chatId: number, address: string): string {
+    return walletLabels.get(chatId)?.get(address) ?? '';
+  }
+
+  // ─── Chain Detection ─────────────────────────────────────────────────────────
+
+  detectChain(
+    address: string,
+  ): 'solana' | 'ethereum' | 'bitcoin' | 'tron' | 'bnb' | 'unknown' {
+    const trimmed = address.trim();
+
+    // Ethereum / BNB / EVM — starts with 0x, 42 chars
+    if (/^0x[a-fA-F0-9]{40}$/.test(trimmed)) return 'ethereum';
+
+    // Bitcoin — starts with 1, 3, or bc1
+    if (
+      /^(1|3)[a-zA-Z0-9]{25,34}$/.test(trimmed) ||
+      /^bc1[a-zA-Z0-9]{6,87}$/.test(trimmed)
+    )
+      return 'bitcoin';
+
+    // Tron — starts with T, 34 chars
+    if (/^T[a-zA-Z0-9]{33}$/.test(trimmed)) return 'tron';
+
+    // Solana — base58, 32-44 chars, no 0/O/I/l
+    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
+      try {
+        new PublicKey(trimmed);
+        return 'solana';
+      } catch {
+        /* fall through */
+      }
+    }
+
+    return 'unknown';
+  }
+
+  chainErrorMessage(address: string): string | null {
+    const chain = this.detectChain(address);
+    if (chain === 'solana') return null; // valid, no error
+
+    const chainNames: Record<string, string> = {
+      ethereum: '⟠ Ethereum / EVM (MetaMask address)',
+      bitcoin: '₿ Bitcoin',
+      tron: '🔺 Tron',
+    };
+
+    const detected = chainNames[chain] ?? '❓ Unknown chain';
+    return (
+      `⛔ <b>That's not a Solana wallet</b>\n\n` +
+      `Detected: <b>${detected}</b>\n\n` +
+      `This bot only supports <b>Solana</b> wallets.\n` +
+      `Solana addresses look like:\n<code>EizqmoCSovbTzuSnmxkdaJwLBBZgyB2GyjN3m3uJWXpZ</code>`
+    );
   }
 
   // ─── Min Trade Filter ────────────────────────────────────────────────────────
@@ -535,13 +605,51 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         const min = minTradeSize.get(chatId) ?? 0;
         if (action.usdValue < min) return;
 
+        const label = this.getWalletLabel(chatId, walletAddress);
         const message = this.formatTradeMessage(
           walletAddress,
           signature,
           action,
+          label,
         );
         this.bot.telegram
-          .sendMessage(chatId, message, { parse_mode: 'HTML' })
+          .sendMessage(chatId, message, {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: '💼 Portfolio',
+                    callback_data: `wallet_portfolio:${walletAddress}`,
+                  },
+                  {
+                    text: '📜 TX History',
+                    callback_data: `wallet_txhistory:${walletAddress}`,
+                  },
+                ],
+                ...(action.tokenMint
+                  ? [
+                      [
+                        {
+                          text: '📈 Chart',
+                          url: `https://dexscreener.com/solana/${action.tokenMint}`,
+                        },
+                        {
+                          text: '🪙 Token',
+                          url: `https://solscan.io/token/${action.tokenMint}`,
+                        },
+                      ],
+                    ]
+                  : []),
+                [
+                  {
+                    text: '👛 Wallet',
+                    url: `https://solscan.io/account/${walletAddress}`,
+                  },
+                ],
+              ],
+            },
+          })
           .catch((err) => {
             this.logger.error(`Failed to send to ${chatId}: ${err.message}`);
           });
@@ -638,10 +746,11 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       solAmount: number;
       usdValue: number;
     },
+    label?: string,
   ): string {
     const isBuy = action.type === 'BUY';
     const emoji = isBuy ? '🟢' : '🔴';
-    const label = isBuy ? '🟢 BUY' : '🔴 SELL';
+    const labelLine = label ? `🏷 <b>${label}</b>\n` : '';
     const short = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
 
     const usdLine =
@@ -664,8 +773,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       : `🔗 <a href="https://solscan.io/tx/${signature}">View Transaction</a>`;
 
     return (
-      `${emoji} <b>${label}</b>\n` +
+      `${emoji} <b>${isBuy ? '🟢 BUY' : '🔴 SELL'}</b>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
+      labelLine +
       `👛 <a href="https://solscan.io/account/${walletAddress}">${short}</a>\n` +
       `🏷 Token: <b>${action.tokenSymbol}</b>\n` +
       tokenAmountLine +
