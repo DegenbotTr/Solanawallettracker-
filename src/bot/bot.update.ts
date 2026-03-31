@@ -8,8 +8,21 @@ import {
   Action,
 } from 'nestjs-telegraf';
 import { Context } from 'telegraf';
-import { InlineKeyboardMarkup } from 'telegraf/types';
+import { InlineKeyboardMarkup, ReplyKeyboardMarkup } from 'telegraf/types';
 import { SolanaService } from '../solana/solana.service';
+
+// Persistent bottom keyboard — always visible above the text input
+const persistentKeyboard: ReplyKeyboardMarkup = {
+  keyboard: [
+    [
+      { text: '➕ Track Wallet' },
+      { text: '📋 List Wallets' },
+      { text: '🏠 Menu' },
+    ],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+};
 
 type PendingAction =
   | 'watch'
@@ -25,6 +38,17 @@ const pendingAction = new Map<number, PendingAction>();
 const pendingLabelAddress = new Map<number, string>();
 
 // ─── Keyboards ────────────────────────────────────────────────────────────────
+
+const MAIN_MENU_TEXT =
+  `🏠 <b>Sol Wallet Watcher</b>\n` +
+  `━━━━━━━━━━━━━━━━━━━━\n` +
+  `👁 <b>Watch Wallet</b> — track a new wallet\n` +
+  `📋 <b>My List</b> — view & manage your wallets\n` +
+  `💼 <b>Portfolio</b> — see all tokens & their value\n` +
+  `📜 <b>TX History</b> — last 10 transactions\n` +
+  `💲 <b>Token Price</b> — check any token price\n` +
+  `⚙️ <b>Min Size</b> — filter small trade alerts\n` +
+  `📊 <b>Stats</b> — bot usage overview`;
 
 function mainMenuKeyboard(): InlineKeyboardMarkup {
   return {
@@ -123,14 +147,28 @@ export class BotUpdate {
   @Start()
   async onStart(@Ctx() ctx: Context): Promise<void> {
     this.trackUser(ctx);
+    const username = (ctx.from as any)?.first_name || 'Trader';
+
+    // Welcome message with bot description
     await ctx.reply(
-      `🚀 <b>Sol Wallet Watcher</b>\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `Real-time Solana wallet tracker.\n` +
-        `Get instant alerts on buys & sells.\n\n` +
-        `Choose an option below 👇`,
-      { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() },
+      `� <b>Welcome, ${username}!</b>\n\n` +
+        `🔭 <b>Sol Wallet Watcher</b> is a real-time Solana wallet tracker.\n\n` +
+        `⚡ <b>What it does:</b>\n` +
+        `• Watches any Solana wallet 24/7\n` +
+        `• Sends instant alerts when they buy or sell\n` +
+        `• Shows token portfolio & USD value\n` +
+        `• Tracks transaction history with trade details\n` +
+        `• Checks live token prices\n\n` +
+        `⚠️ <b>Solana only</b> — ETH, BTC and other chains are not supported.\n\n` +
+        `Use the menu below to get started 👇`,
+      { parse_mode: 'HTML', reply_markup: persistentKeyboard },
     );
+
+    // Show inline menu
+    await ctx.reply(`🏠 <b>Main Menu</b>`, {
+      parse_mode: 'HTML',
+      reply_markup: mainMenuKeyboard(),
+    });
   }
 
   @Command('help')
@@ -433,6 +471,29 @@ export class BotUpdate {
     if (text.startsWith('/')) return;
     const chatId = ctx.chat.id;
     this.trackUser(ctx);
+
+    // Handle persistent bottom keyboard buttons
+    if (text === '➕ Track Wallet') {
+      pendingAction.set(chatId, 'watch');
+      await ctx.reply(
+        `👛 <b>Add Wallet</b>\n\nPaste the Solana wallet address you want to watch:`,
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+    if (text === '📋 List Wallets') {
+      const { text: listText, keyboard } = this.buildWalletListContent(chatId);
+      await ctx.reply(listText, { parse_mode: 'HTML', reply_markup: keyboard });
+      return;
+    }
+    if (text === '🏠 Menu') {
+      await ctx.reply(`🏠 <b>Main Menu</b>`, {
+        parse_mode: 'HTML',
+        reply_markup: mainMenuKeyboard(),
+      });
+      return;
+    }
+
     const action = pendingAction.get(chatId);
     if (!action) return;
     pendingAction.delete(chatId);
