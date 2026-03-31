@@ -1,0 +1,5 @@
+# env - never commit this
+.env
+
+# dependencies
+node_modules/
