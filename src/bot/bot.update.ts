@@ -28,14 +28,21 @@ type PendingAction =
   | 'watch'
   | 'unwatch'
   | 'portfolio'
+  | 'pnl'
   | 'txhistory'
   | 'price'
   | 'minsize'
   | 'label_address'
-  | 'label_name';
+  | 'label_name'
+  | 'tag_address'
+  | 'tag_name'
+  | 'untag_address'
+  | 'untag_name'
+  | 'filter_tag';
 
 const pendingAction = new Map<number, PendingAction>();
 const pendingLabelAddress = new Map<number, string>();
+const pendingTagAddress = new Map<number, string>();
 
 // ─── Keyboards ────────────────────────────────────────────────────────────────
 
@@ -78,16 +85,24 @@ function walletKeyboard(address: string): InlineKeyboardMarkup {
     inline_keyboard: [
       [
         { text: '💼 Portfolio', callback_data: `wallet_portfolio:${address}` },
+        { text: '📊 PnL Analysis', callback_data: `wallet_pnl:${address}` },
+      ],
+      [
         { text: '📜 TX History', callback_data: `wallet_txhistory:${address}` },
+        {
+          text: '🔄 Backfill Trades',
+          callback_data: `wallet_backfill:${address}`,
+        },
       ],
       [
         { text: '🏷 Label', callback_data: `wallet_label:${address}` },
-        { text: '🗑 Unwatch', callback_data: `wallet_unwatch:${address}` },
+        { text: '🏴 Tags', callback_data: `wallet_tags:${address}` },
       ],
+      [{ text: '🗑 Unwatch', callback_data: `wallet_unwatch:${address}` }],
       [
-        { text: '� Solscan', url: `https://solscan.io/account/${address}` },
+        { text: '🔍 Solscan', url: `https://solscan.io/account/${address}` },
         {
-          text: '� DexScreener',
+          text: '📈 DexScreener',
           url: `https://dexscreener.com/solana/${address}`,
         },
       ],
@@ -111,7 +126,10 @@ export class BotUpdate {
   private async trackUser(ctx: Context): Promise<void> {
     const chatId = ctx.chat?.id;
     if (!chatId) return;
-    await this.solanaService.trackUser(chatId, (ctx.from as any)?.username || '');
+    await this.solanaService.trackUser(
+      chatId,
+      (ctx.from as any)?.username || '',
+    );
   }
 
   private async buildWalletListContent(chatId: number): Promise<{
@@ -271,6 +289,60 @@ export class BotUpdate {
       `💼 <b>Portfolio Lookup</b>\n\nPaste the Solana wallet address to check:`,
       { parse_mode: 'HTML' },
     );
+  }
+
+  @Command('pnl')
+  async onPnl(@Ctx() ctx: Context): Promise<void> {
+    const address = this.extractArg(ctx);
+    if (address) {
+      await this.showPnlAnalysis(ctx, address);
+      return;
+    }
+    pendingAction.set(ctx.chat.id, 'pnl');
+    await ctx.reply(
+      `📊 <b>PnL Analysis</b>\n\nPaste the Solana wallet address to analyse:`,
+      { parse_mode: 'HTML' },
+    );
+  }
+
+  @Command('backfill')
+  async onBackfill(@Ctx() ctx: Context): Promise<void> {
+    const address = this.extractArg(ctx);
+    if (!address) {
+      await ctx.reply(
+        `🔄 <b>Backfill Historical Trades</b>\n\nUsage: <code>/backfill &lt;wallet_address&gt;</code>\n\nThis will scan the last 100 transactions and import them for PnL tracking.`,
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+    const chainErr = this.solanaService.chainErrorMessage(address);
+    if (chainErr) {
+      await ctx.reply(chainErr, { parse_mode: 'HTML' });
+      return;
+    }
+    const loading = await ctx.reply(
+      '🔄 Backfilling historical trades... This may take a minute.',
+    );
+    try {
+      const result = await this.solanaService.backfillTrades(address, 100);
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        result.success
+          ? `✅ <b>Backfill Complete</b>\n\n${result.message}\n\nYou can now view full PnL history with <code>/pnl ${address}</code>`
+          : `❌ <b>Backfill Failed</b>\n\n${result.message}`,
+        { parse_mode: 'HTML' },
+      );
+    } catch (err) {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        `❌ Failed to backfill trades. Please try again.`,
+        { parse_mode: 'HTML' },
+      );
+    }
   }
 
   @Command('txhistory')
@@ -443,6 +515,41 @@ export class BotUpdate {
     await this.showTxHistory(ctx, (ctx as any).match[1]);
   }
 
+  @Action(/^wallet_pnl:(.+)$/)
+  async onWalletPnl(@Ctx() ctx: Context): Promise<void> {
+    await ctx.answerCbQuery();
+    await this.showPnlAnalysis(ctx, (ctx as any).match[1]);
+  }
+
+  @Action(/^wallet_backfill:(.+)$/)
+  async onWalletBackfill(@Ctx() ctx: Context): Promise<void> {
+    await ctx.answerCbQuery();
+    const address = (ctx as any).match[1];
+    const loading = await ctx.reply(
+      '🔄 Backfilling historical trades... This may take a minute.',
+    );
+    try {
+      const result = await this.solanaService.backfillTrades(address, 100);
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        result.success
+          ? `✅ <b>Backfill Complete</b>\n\n${result.message}\n\nYou can now view full PnL history with /pnl`
+          : `❌ <b>Backfill Failed</b>\n\n${result.message}`,
+        { parse_mode: 'HTML' },
+      );
+    } catch (err) {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        `❌ Failed to backfill trades. Please try again.`,
+        { parse_mode: 'HTML' },
+      );
+    }
+  }
+
   @Action(/^wallet_unwatch:(.+)$/)
   async onWalletUnwatch(@Ctx() ctx: Context): Promise<void> {
     await ctx.answerCbQuery();
@@ -455,7 +562,10 @@ export class BotUpdate {
     const address = (ctx as any).match[1];
     pendingLabelAddress.set(ctx.chat.id, address);
     pendingAction.set(ctx.chat.id, 'label_name');
-    const existing = await this.solanaService.getWalletLabel(ctx.chat.id, address);
+    const existing = await this.solanaService.getWalletLabel(
+      ctx.chat.id,
+      address,
+    );
     const current = existing ? ` (current: <b>${existing}</b>)` : '';
     await ctx.reply(
       `🏷 Enter a name for this wallet${current}:\n<code>${address}</code>`,
@@ -484,7 +594,8 @@ export class BotUpdate {
       return;
     }
     if (text === '📋 List Wallets') {
-      const { text: listText, keyboard } = await this.buildWalletListContent(chatId);
+      const { text: listText, keyboard } =
+        await this.buildWalletListContent(chatId);
       await ctx.reply(listText, { parse_mode: 'HTML', reply_markup: keyboard });
       return;
     }
@@ -504,6 +615,7 @@ export class BotUpdate {
     if (action === 'watch') await this.addWallet(ctx, input);
     else if (action === 'unwatch') await this.removeWallet(ctx, input);
     else if (action === 'portfolio') await this.showPortfolio(ctx, input);
+    else if (action === 'pnl') await this.showPnlAnalysis(ctx, input);
     else if (action === 'txhistory') await this.showTxHistory(ctx, input);
     else if (action === 'price') await this.showPrice(ctx, input);
     else if (action === 'minsize') await this.setMinSize(ctx, input);
@@ -533,7 +645,11 @@ export class BotUpdate {
         await ctx.reply('❌ Something went wrong. Try /label again.');
         return;
       }
-      const success = await this.solanaService.setWalletLabel(chatId, address, input);
+      const success = await this.solanaService.setWalletLabel(
+        chatId,
+        address,
+        input,
+      );
       if (!success) {
         await ctx.reply('❌ Could not set label. Try /label again.');
         return;
@@ -580,7 +696,10 @@ export class BotUpdate {
   }
 
   private async removeWallet(ctx: Context, address: string): Promise<void> {
-    const success = await this.solanaService.unwatchWallet(address, ctx.chat.id);
+    const success = await this.solanaService.unwatchWallet(
+      address,
+      ctx.chat.id,
+    );
     if (!success) {
       await ctx.reply(`❌ That wallet isn't in your watch list.`);
       return;
@@ -647,6 +766,33 @@ export class BotUpdate {
         (loading as any).message_id,
         undefined,
         `❌ Failed to load history. Please try again.`,
+        { parse_mode: 'HTML' },
+      );
+    }
+  }
+
+  private async showPnlAnalysis(ctx: Context, address: string): Promise<void> {
+    const chainErr = this.solanaService.chainErrorMessage(address);
+    if (chainErr) {
+      await ctx.reply(chainErr, { parse_mode: 'HTML' });
+      return;
+    }
+    const loading = await ctx.reply('⏳ Calculating PnL...');
+    try {
+      const result = await this.solanaService.getPnlAnalysis(address);
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        result,
+        { parse_mode: 'HTML', reply_markup: walletKeyboard(address) },
+      );
+    } catch {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        `❌ Failed to load PnL analysis. Please try again.`,
         { parse_mode: 'HTML' },
       );
     }

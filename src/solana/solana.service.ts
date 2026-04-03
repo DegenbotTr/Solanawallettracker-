@@ -114,7 +114,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       });
 
       await this.prisma.watchedWallet.upsert({
-        where: { userId_walletAddress: { userId: chatId, walletAddress: address } },
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
         create: { userId: chatId, walletAddress: address },
         update: {},
       });
@@ -129,7 +131,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     try {
       // Remove the join record
       await this.prisma.watchedWallet.delete({
-        where: { userId_walletAddress: { userId: chatId, walletAddress: address } },
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
       });
 
       // Check if anyone else is still watching this wallet
@@ -150,21 +154,30 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async getWatchedWallets(chatId: number): Promise<{ address: string; label: string }[]> {
+  async getWatchedWallets(
+    chatId: number,
+  ): Promise<{ address: string; label: string; tags: string[] }[]> {
     const list = await this.prisma.watchedWallet.findMany({
       where: { userId: chatId },
-      select: { walletAddress: true, label: true },
+      select: { walletAddress: true, label: true, tags: true },
     });
     return list.map((item) => ({
       address: item.walletAddress,
       label: item.label ?? '',
+      tags: item.tags,
     }));
   }
 
-  async setWalletLabel(chatId: number, address: string, label: string): Promise<boolean> {
+  async setWalletLabel(
+    chatId: number,
+    address: string,
+    label: string,
+  ): Promise<boolean> {
     try {
       await this.prisma.watchedWallet.update({
-        where: { userId_walletAddress: { userId: chatId, walletAddress: address } },
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
         data: { label },
       });
       return true;
@@ -175,10 +188,110 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
   async getWalletLabel(chatId: number, address: string): Promise<string> {
     const entry = await this.prisma.watchedWallet.findUnique({
-      where: { userId_walletAddress: { userId: chatId, walletAddress: address } },
+      where: {
+        userId_walletAddress: { userId: chatId, walletAddress: address },
+      },
       select: { label: true },
     });
     return entry?.label ?? '';
+  }
+
+  // ─── Wallet Tags ─────────────────────────────────────────────────────────────
+
+  async addWalletTag(
+    chatId: number,
+    address: string,
+    tag: string,
+  ): Promise<boolean> {
+    try {
+      const entry = await this.prisma.watchedWallet.findUnique({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        select: { tags: true },
+      });
+      if (!entry) return false;
+
+      const normalizedTag = tag.toLowerCase().trim();
+      if (entry.tags.includes(normalizedTag)) return true; // already has tag
+
+      await this.prisma.watchedWallet.update({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        data: { tags: { push: normalizedTag } },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async removeWalletTag(
+    chatId: number,
+    address: string,
+    tag: string,
+  ): Promise<boolean> {
+    try {
+      const entry = await this.prisma.watchedWallet.findUnique({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        select: { tags: true },
+      });
+      if (!entry) return false;
+
+      const normalizedTag = tag.toLowerCase().trim();
+      const newTags = entry.tags.filter((t) => t !== normalizedTag);
+
+      await this.prisma.watchedWallet.update({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        data: { tags: newTags },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getWalletTags(chatId: number, address: string): Promise<string[]> {
+    const entry = await this.prisma.watchedWallet.findUnique({
+      where: {
+        userId_walletAddress: { userId: chatId, walletAddress: address },
+      },
+      select: { tags: true },
+    });
+    return entry?.tags ?? [];
+  }
+
+  async getWalletsByTag(
+    chatId: number,
+    tag: string,
+  ): Promise<{ address: string; label: string }[]> {
+    const normalizedTag = tag.toLowerCase().trim();
+    const wallets = await this.prisma.watchedWallet.findMany({
+      where: {
+        userId: chatId,
+        tags: { has: normalizedTag },
+      },
+      select: { walletAddress: true, label: true },
+    });
+    return wallets.map((w) => ({
+      address: w.walletAddress,
+      label: w.label ?? '',
+    }));
+  }
+
+  async getAllTags(chatId: number): Promise<string[]> {
+    const wallets = await this.prisma.watchedWallet.findMany({
+      where: { userId: chatId },
+      select: { tags: true },
+    });
+    const allTags = new Set<string>();
+    wallets.forEach((w) => w.tags.forEach((t) => allTags.add(t)));
+    return Array.from(allTags).sort();
   }
 
   // ─── Chain Detection ─────────────────────────────────────────────────────────
@@ -606,6 +719,56 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
       action.usdValue = action.solAmount * solPrice;
 
+      // ── Fetch token metadata for better display ───────────────────────────
+      if (action.tokenMint) {
+        const meta = await this.fetchTokenMeta(action.tokenMint);
+        if (meta.symbol) action.tokenSymbol = meta.symbol;
+        if (meta.name) action.tokenName = meta.name;
+      }
+
+      // ── Fetch market cap from Jupiter ─────────────────────────────────────
+      let marketCapUsd = 0;
+      let pricePerToken = 0;
+      if (action.tokenMint) {
+        try {
+          const jr = await fetch(
+            `https://price.jup.ag/v6/price?ids=${action.tokenMint}`,
+          );
+          const jd = await jr.json();
+          pricePerToken = jd?.data?.[action.tokenMint]?.price ?? 0;
+        } catch {
+          /* best effort */
+        }
+      }
+
+      // ── Persist trade to DB ───────────────────────────────────────────────
+      if (action.tokenMint) {
+        try {
+          await this.prisma.trade.upsert({
+            where: { signature },
+            create: {
+              walletAddress,
+              signature,
+              type: action.type,
+              tokenMint: action.tokenMint,
+              tokenSymbol: action.tokenSymbol,
+              tokenName: action.tokenName ?? '',
+              tokenAmount: action.tokenAmount,
+              priceUsd: pricePerToken,
+              totalUsd: action.usdValue,
+              marketCapUsd,
+              solAmount: action.solAmount,
+              timestamp: tx.blockTime
+                ? new Date(tx.blockTime * 1000)
+                : new Date(),
+            },
+            update: {},
+          });
+        } catch (e) {
+          this.logger.warn(`Could not save trade: ${e.message}`);
+        }
+      }
+
       // Fetch all users watching this wallet from DB
       const watchers = await this.prisma.watchedWallet.findMany({
         where: { walletAddress },
@@ -641,7 +804,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
                   },
                 ],
                 ...(action.tokenMint
-                   ? [
+                  ? [
                       [
                         {
                           text: '📈 Chart',
@@ -678,6 +841,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
   ): {
     type: 'BUY' | 'SELL';
     tokenSymbol: string;
+    tokenName: string;
     tokenMint: string;
     tokenAmount: number;
     solAmount: number;
@@ -749,11 +913,316 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     return {
       type,
       tokenSymbol,
+      tokenName: '',
       tokenMint,
       tokenAmount,
       solAmount: Math.abs(solChange),
       usdValue: 0,
     };
+  }
+
+  // ─── Token Metadata ───────────────────────────────────────────────────────────
+
+  private async fetchTokenMeta(
+    mint: string,
+  ): Promise<{ name: string; symbol: string }> {
+    try {
+      const res = await fetch(
+        `https://mainnet.helius-rpc.com/?api-key=${this.apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'getAsset',
+            params: { id: mint },
+          }),
+        },
+      );
+      const data = await res.json();
+      const meta = data?.result?.content?.metadata;
+      const info = data?.result?.token_info;
+      return {
+        name: meta?.name || info?.name || '',
+        symbol: meta?.symbol || info?.symbol || '',
+      };
+    } catch {
+      return { name: '', symbol: '' };
+    }
+  }
+
+  // ─── PnL Analysis ─────────────────────────────────────────────────────────────
+
+  async getPnlAnalysis(walletAddress: string): Promise<string> {
+    try {
+      new PublicKey(walletAddress);
+    } catch {
+      throw new Error('invalid_address');
+    }
+
+    // Get all trades for this wallet from DB
+    const trades = await this.prisma.trade.findMany({
+      where: { walletAddress },
+      orderBy: { timestamp: 'asc' },
+    });
+
+    if (trades.length === 0) {
+      return (
+        `📊 <b>PnL Analysis</b>\n\n` +
+        `No trades recorded yet for this wallet.\n\n` +
+        `Trades are tracked automatically once you watch a wallet and activity is detected.`
+      );
+    }
+
+    // Group trades by token mint
+    const byMint = new Map<string, typeof trades>();
+    for (const t of trades) {
+      if (!byMint.has(t.tokenMint)) byMint.set(t.tokenMint, []);
+      byMint.get(t.tokenMint).push(t);
+    }
+
+    // Fetch current prices for all unique mints in parallel
+    const mints = [...byMint.keys()];
+    const priceMap = new Map<string, number>();
+    try {
+      const res = await fetch(
+        `https://price.jup.ag/v6/price?ids=${mints.join(',')}`,
+      );
+      const data = await res.json();
+      for (const mint of mints) {
+        priceMap.set(mint, data?.data?.[mint]?.price ?? 0);
+      }
+    } catch {
+      /* best effort */
+    }
+
+    const short = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+    let totalRealizedPnl = 0;
+    let totalUnrealizedPnl = 0;
+    const tokenLines: string[] = [];
+
+    for (const [mint, mintTrades] of byMint) {
+      const buys = mintTrades.filter((t) => t.type === 'BUY');
+      const sells = mintTrades.filter((t) => t.type === 'SELL');
+      const symbol = mintTrades[mintTrades.length - 1].tokenSymbol;
+      const name = mintTrades[mintTrades.length - 1].tokenName || symbol;
+      const currentPrice = priceMap.get(mint) ?? 0;
+      const firstBuy = buys[0];
+
+      // Total bought / sold amounts
+      const totalBought = buys.reduce((s, t) => s + t.tokenAmount, 0);
+      const totalSold = sells.reduce((s, t) => s + t.tokenAmount, 0);
+      const totalSpentUsd = buys.reduce((s, t) => s + t.totalUsd, 0);
+      const totalReceivedUsd = sells.reduce((s, t) => s + t.totalUsd, 0);
+      const avgBuyPrice = totalBought > 0 ? totalSpentUsd / totalBought : 0;
+
+      // Remaining tokens (unrealized)
+      const remaining = Math.max(0, totalBought - totalSold);
+      const currentValue = remaining * currentPrice;
+      const costBasisRemaining = remaining * avgBuyPrice;
+      const unrealizedPnl = currentValue - costBasisRemaining;
+
+      // Realized PnL from sells
+      const realizedPnl = totalReceivedUsd - totalSold * avgBuyPrice;
+
+      totalRealizedPnl += realizedPnl;
+      totalUnrealizedPnl += unrealizedPnl;
+
+      const totalPnl = realizedPnl + unrealizedPnl;
+      const pnlEmoji = totalPnl >= 0 ? '📈' : '📉';
+      const pnlSign = totalPnl >= 0 ? '+' : '';
+      const mintShort = `${mint.slice(0, 6)}...${mint.slice(-4)}`;
+      const firstBuyTime = firstBuy
+        ? new Date(firstBuy.timestamp).toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+          })
+        : 'unknown';
+
+      // Market cap at first buy vs now
+      const mcapAtBuy = firstBuy?.marketCapUsd ?? 0;
+      const mcapLine =
+        mcapAtBuy > 0
+          ? `   📦 MCap at buy: <b>$${mcapAtBuy >= 1e6 ? (mcapAtBuy / 1e6).toFixed(2) + 'M' : mcapAtBuy.toFixed(0)}</b>\n`
+          : '';
+
+      const currentPriceLine =
+        currentPrice > 0
+          ? `   💲 Now: <b>$${currentPrice < 0.0001 ? currentPrice.toExponential(3) : currentPrice.toFixed(6)}</b>  ·  Avg buy: <b>$${avgBuyPrice < 0.0001 ? avgBuyPrice.toExponential(3) : avgBuyPrice.toFixed(6)}</b>\n`
+          : `   💲 Avg buy: <b>$${avgBuyPrice < 0.0001 ? avgBuyPrice.toExponential(3) : avgBuyPrice.toFixed(6)}</b>\n`;
+
+      tokenLines.push(
+        `🪙 <b>${name}</b> (<a href="https://dexscreener.com/solana/${mint}">${mintShort}</a>)\n` +
+          `   📅 First buy: <b>${firstBuyTime}</b>\n` +
+          `   🛒 Bought: <b>${totalBought.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${symbol}</b>  ·  <b>$${totalSpentUsd.toFixed(2)}</b>\n` +
+          (totalSold > 0
+            ? `   💸 Sold: <b>${totalSold.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${symbol}</b>  ·  <b>$${totalReceivedUsd.toFixed(2)}</b>\n`
+            : '') +
+          (remaining > 0
+            ? `   👜 Holding: <b>${remaining.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${symbol}</b>  ·  <b>$${currentValue.toFixed(2)}</b>\n`
+            : '') +
+          currentPriceLine +
+          mcapLine +
+          `   ${pnlEmoji} PnL: <b>${pnlSign}$${totalPnl.toFixed(2)}</b>` +
+          (realizedPnl !== 0
+            ? `  (realized: <b>${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}</b>)`
+            : '') +
+          `\n`,
+      );
+    }
+
+    const totalPnl = totalRealizedPnl + totalUnrealizedPnl;
+    const totalEmoji = totalPnl >= 0 ? '📈' : '📉';
+    const totalSign = totalPnl >= 0 ? '+' : '';
+
+    const lines = [
+      `┌─────────────────────────────`,
+      `│ 📊 <b>PnL ANALYSIS</b>`,
+      `│ 👛 <a href="https://solscan.io/account/${walletAddress}">${short}</a>`,
+      `│ 🪙 ${byMint.size} token${byMint.size !== 1 ? 's' : ''} tracked`,
+      `└─────────────────────────────\n`,
+      `${totalEmoji} Total PnL: <b>${totalSign}$${totalPnl.toFixed(2)}</b>`,
+      `   📈 Unrealized: <b>${totalUnrealizedPnl >= 0 ? '+' : ''}$${totalUnrealizedPnl.toFixed(2)}</b>`,
+      `   💸 Realized:   <b>${totalRealizedPnl >= 0 ? '+' : ''}$${totalRealizedPnl.toFixed(2)}</b>\n`,
+      `━━━━━━━━━━━━━━━━━━━━\n`,
+      ...tokenLines,
+      `🔗 <a href="https://solscan.io/account/${walletAddress}">View on Solscan</a>`,
+    ];
+
+    return lines.join('\n');
+  }
+
+  // ─── Backfill Historical Trades ──────────────────────────────────────────────
+
+  async backfillTrades(
+    walletAddress: string,
+    limit: number = 100,
+  ): Promise<{ success: boolean; count: number; message: string }> {
+    try {
+      new PublicKey(walletAddress);
+    } catch {
+      return { success: false, count: 0, message: 'Invalid wallet address' };
+    }
+
+    try {
+      // Fetch historical signatures
+      const sigsRes = await this.connection.getSignaturesForAddress(
+        new PublicKey(walletAddress),
+        { limit },
+      );
+
+      if (!sigsRes.length) {
+        return { success: true, count: 0, message: 'No transactions found' };
+      }
+
+      // Fetch full tx details in parallel (batches of 10 to avoid rate limits)
+      const batchSize = 10;
+      const allTxs: (ParsedTransactionWithMeta | null)[] = [];
+      for (let i = 0; i < sigsRes.length; i += batchSize) {
+        const batch = sigsRes.slice(i, i + batchSize);
+        const txs = await Promise.all(
+          batch.map((s) =>
+            this.connection
+              .getParsedTransaction(s.signature, {
+                maxSupportedTransactionVersion: 0,
+              })
+              .catch(() => null),
+          ),
+        );
+        allTxs.push(...txs);
+      }
+
+      // Fetch SOL price for USD conversion (use current price as approximation)
+      let solPrice = 0;
+      try {
+        const p = await (
+          await fetch(
+            'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
+          )
+        ).json();
+        solPrice = p?.solana?.usd ?? 0;
+      } catch {
+        /* best effort */
+      }
+
+      let savedCount = 0;
+
+      for (let i = 0; i < sigsRes.length; i++) {
+        const sig = sigsRes[i];
+        const tx = allTxs[i];
+        if (!tx || sig.err) continue;
+
+        // Check if already saved
+        const existing = await this.prisma.trade.findUnique({
+          where: { signature: sig.signature },
+        });
+        if (existing) continue;
+
+        const action = this.detectAction(tx, walletAddress);
+        if (!action) continue;
+
+        action.usdValue = action.solAmount * solPrice;
+
+        // Fetch token metadata
+        if (action.tokenMint) {
+          const meta = await this.fetchTokenMeta(action.tokenMint);
+          if (meta.symbol) action.tokenSymbol = meta.symbol;
+          if (meta.name) action.tokenName = meta.name;
+        }
+
+        // Fetch market price (current, as historical prices aren't available)
+        let pricePerToken = 0;
+        if (action.tokenMint) {
+          try {
+            const jr = await fetch(
+              `https://price.jup.ag/v6/price?ids=${action.tokenMint}`,
+            );
+            const jd = await jr.json();
+            pricePerToken = jd?.data?.[action.tokenMint]?.price ?? 0;
+          } catch {
+            /* best effort */
+          }
+        }
+
+        // Save to DB
+        try {
+          await this.prisma.trade.create({
+            data: {
+              walletAddress,
+              signature: sig.signature,
+              type: action.type,
+              tokenMint: action.tokenMint,
+              tokenSymbol: action.tokenSymbol,
+              tokenName: action.tokenName ?? '',
+              tokenAmount: action.tokenAmount,
+              priceUsd: pricePerToken,
+              totalUsd: action.usdValue,
+              marketCapUsd: 0,
+              solAmount: action.solAmount,
+              timestamp: sig.blockTime
+                ? new Date(sig.blockTime * 1000)
+                : new Date(),
+            },
+          });
+          savedCount++;
+        } catch (e) {
+          this.logger.warn(
+            `Could not save backfilled trade ${sig.signature}: ${e.message}`,
+          );
+        }
+      }
+
+      return {
+        success: true,
+        count: savedCount,
+        message: `Backfilled ${savedCount} trade${savedCount !== 1 ? 's' : ''} from ${sigsRes.length} transactions`,
+      };
+    } catch (err) {
+      this.logger.error(`Backfill error: ${err.message}`);
+      return { success: false, count: 0, message: `Error: ${err.message}` };
+    }
   }
 
   private formatTradeMessage(
@@ -762,6 +1231,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     action: {
       type: 'BUY' | 'SELL';
       tokenSymbol: string;
+      tokenName: string;
       tokenMint: string;
       tokenAmount: number;
       solAmount: number;
