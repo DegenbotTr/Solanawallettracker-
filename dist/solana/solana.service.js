@@ -413,6 +413,56 @@ let SolanaService = SolanaService_1 = class SolanaService {
             catch {
             }
             action.usdValue = action.solAmount * solPrice;
+            const [inMeta, outMeta] = await Promise.all([
+                action.inMint
+                    ? this.fetchTokenMeta(action.inMint)
+                    : Promise.resolve({ name: 'Solana', symbol: 'SOL' }),
+                action.outMint
+                    ? this.fetchTokenMeta(action.outMint)
+                    : Promise.resolve({ name: 'Solana', symbol: 'SOL' }),
+            ]);
+            action.inSymbol = inMeta.symbol || action.inSymbol;
+            action.inName = inMeta.name || action.inName;
+            action.outSymbol = outMeta.symbol || action.outSymbol;
+            action.outName = outMeta.name || action.outName;
+            if (action.tokenMint === action.inMint) {
+                action.tokenSymbol = action.inSymbol;
+                action.tokenName = action.inName;
+            }
+            else if (action.tokenMint === action.outMint) {
+                action.tokenSymbol = action.outSymbol;
+                action.tokenName = action.outName;
+            }
+            const primaryMint = action.inMint ?? action.outMint;
+            let marketPrice = 0;
+            if (primaryMint) {
+                try {
+                    const jr = await fetch(`https://price.jup.ag/v6/price?ids=${primaryMint}`);
+                    const jd = await jr.json();
+                    marketPrice = jd?.data?.[primaryMint]?.price ?? 0;
+                }
+                catch {
+                }
+            }
+            const txFeeSol = (tx.meta?.fee ?? 0) / 1e9;
+            const txFeeUsd = txFeeSol * solPrice;
+            const txTime = tx.blockTime
+                ? new Date(tx.blockTime * 1000).toLocaleString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                })
+                : null;
+            let priceImpact = null;
+            if (marketPrice > 0 &&
+                action.inMint &&
+                action.inAmount > 0 &&
+                action.usdValue > 0) {
+                const paidPerToken = action.usdValue / action.inAmount;
+                priceImpact = ((paidPerToken - marketPrice) / marketPrice) * 100;
+            }
             const entry = this.watchedWallets.get(walletAddress);
             if (!entry)
                 return;
@@ -421,7 +471,8 @@ let SolanaService = SolanaService_1 = class SolanaService {
                 if (action.usdValue < min)
                     return;
                 const label = this.getWalletLabel(chatId, walletAddress);
-                const message = this.formatTradeMessage(walletAddress, signature, action, label);
+                const message = this.formatTradeMessage(walletAddress, signature, action, label, { solPrice, marketPrice, txFeeSol, txFeeUsd, txTime, priceImpact });
+                const primaryMintForButtons = action.inMint ?? action.outMint;
                 this.bot.telegram
                     .sendMessage(chatId, message, {
                     parse_mode: 'HTML',
@@ -437,21 +488,25 @@ let SolanaService = SolanaService_1 = class SolanaService {
                                     callback_data: `wallet_txhistory:${walletAddress}`,
                                 },
                             ],
-                            ...(action.tokenMint
+                            ...(primaryMintForButtons
                                 ? [
                                     [
                                         {
                                             text: '📈 Chart',
-                                            url: `https://dexscreener.com/solana/${action.tokenMint}`,
+                                            url: `https://dexscreener.com/solana/${primaryMintForButtons}`,
                                         },
                                         {
-                                            text: '🪙 Token',
-                                            url: `https://solscan.io/token/${action.tokenMint}`,
+                                            text: '🐦 Birdeye',
+                                            url: `https://birdeye.so/token/${primaryMintForButtons}?chain=solana`,
                                         },
                                     ],
                                 ]
                                 : []),
                             [
+                                {
+                                    text: '🔍 TX on Solscan',
+                                    url: `https://solscan.io/tx/${signature}`,
+                                },
                                 {
                                     text: '👛 Wallet',
                                     url: `https://solscan.io/account/${walletAddress}`,
@@ -469,6 +524,30 @@ let SolanaService = SolanaService_1 = class SolanaService {
             this.logger.error(`Error handling tx ${signature}: ${err.message}`);
         }
     }
+    async fetchTokenMeta(mint) {
+        try {
+            const res = await fetch(`https://mainnet.helius-rpc.com/?api-key=${this.apiKey}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: 1,
+                    method: 'getAsset',
+                    params: { id: mint },
+                }),
+            });
+            const data = await res.json();
+            const meta = data?.result?.content?.metadata;
+            const info = data?.result?.token_info;
+            return {
+                name: meta?.name || info?.name || '',
+                symbol: meta?.symbol || info?.symbol || '',
+            };
+        }
+        catch {
+            return { name: '', symbol: '' };
+        }
+    }
     detectAction(tx, walletAddress) {
         const accountKeys = tx.transaction.message.accountKeys;
         const walletIndex = accountKeys.findIndex((k) => k.pubkey?.toString() === walletAddress ||
@@ -478,68 +557,152 @@ let SolanaService = SolanaService_1 = class SolanaService {
         const solChange = ((tx.meta?.postBalances?.[walletIndex] ?? 0) -
             (tx.meta?.preBalances?.[walletIndex] ?? 0)) /
             1e9;
-        const type = solChange < -0.001 ? 'BUY' : solChange > 0.001 ? 'SELL' : null;
-        if (!type)
-            return null;
         const preTokenBalances = tx.meta?.preTokenBalances || [];
         const postTokenBalances = tx.meta?.postTokenBalances || [];
-        const changedToken = postTokenBalances.find((post) => post.owner === walletAddress &&
-            preTokenBalances.some((pre) => pre.mint === post.mint &&
-                pre.uiTokenAmount.uiAmount !== post.uiTokenAmount.uiAmount));
-        const newToken = !changedToken &&
-            postTokenBalances.find((post) => post.owner === walletAddress &&
-                !preTokenBalances.some((pre) => pre.mint === post.mint && pre.owner === walletAddress));
-        const token = changedToken || newToken;
-        if (!token)
+        const allMints = new Set([
+            ...preTokenBalances
+                .filter((b) => b.owner === walletAddress)
+                .map((b) => b.mint),
+            ...postTokenBalances
+                .filter((b) => b.owner === walletAddress)
+                .map((b) => b.mint),
+        ]);
+        const tokenDeltas = [];
+        for (const mint of allMints) {
+            const pre = preTokenBalances.find((b) => b.mint === mint && b.owner === walletAddress);
+            const post = postTokenBalances.find((b) => b.mint === mint && b.owner === walletAddress);
+            const delta = (post?.uiTokenAmount.uiAmount ?? 0) -
+                (pre?.uiTokenAmount.uiAmount ?? 0);
+            if (Math.abs(delta) > 0)
+                tokenDeltas.push({ mint, delta });
+        }
+        const tokensIn = tokenDeltas.filter((t) => t.delta > 0);
+        const tokensOut = tokenDeltas.filter((t) => t.delta < 0);
+        const solIn = solChange > 0.001;
+        const solOut = solChange < -0.001;
+        if (!solIn && !solOut && tokenDeltas.length === 0)
             return null;
-        let tokenMint = token.mint;
-        let tokenSymbol = `${token.mint.slice(0, 6)}...${token.mint.slice(-4)}`;
-        let tokenAmount = 0;
-        if (changedToken) {
-            const pre = preTokenBalances.find((p) => p.mint === changedToken.mint && p.owner === walletAddress);
-            tokenAmount = Math.abs((changedToken.uiTokenAmount.uiAmount ?? 0) -
-                (pre?.uiTokenAmount.uiAmount ?? 0));
+        if (tokenDeltas.length === 0)
+            return null;
+        let inMint = null;
+        let inAmount = 0;
+        let outMint = null;
+        let outAmount = 0;
+        if (solOut && tokensIn.length > 0) {
+            const t = tokensIn[0];
+            inMint = t.mint;
+            inAmount = t.delta;
+            outMint = null;
+            outAmount = Math.abs(solChange);
         }
-        else if (newToken) {
-            tokenAmount = newToken.uiTokenAmount.uiAmount ?? 0;
+        else if (solIn && tokensOut.length > 0) {
+            const t = tokensOut[0];
+            inMint = null;
+            inAmount = solChange;
+            outMint = t.mint;
+            outAmount = Math.abs(t.delta);
         }
+        else if (tokensIn.length > 0 && tokensOut.length > 0) {
+            inMint = tokensIn[0].mint;
+            inAmount = tokensIn[0].delta;
+            outMint = tokensOut[0].mint;
+            outAmount = Math.abs(tokensOut[0].delta);
+        }
+        else {
+            return null;
+        }
+        const type = inMint !== null && outMint !== null
+            ? 'SWAP'
+            : inMint !== null
+                ? 'BUY'
+                : 'SELL';
+        const shortMint = (m) => `${m.slice(0, 6)}...${m.slice(-4)}`;
         return {
             type,
-            tokenSymbol,
-            tokenMint,
-            tokenAmount,
-            solAmount: Math.abs(solChange),
+            inMint,
+            inName: '',
+            inSymbol: inMint ? shortMint(inMint) : 'SOL',
+            inAmount,
+            outMint,
+            outName: '',
+            outSymbol: outMint ? shortMint(outMint) : 'SOL',
+            outAmount,
             usdValue: 0,
+            tokenMint: (inMint ?? outMint) || '',
+            tokenSymbol: inMint
+                ? shortMint(inMint)
+                : outMint
+                    ? shortMint(outMint)
+                    : 'SOL',
+            tokenName: '',
+            tokenAmount: inMint ? inAmount : outAmount,
+            solAmount: Math.abs(solChange),
         };
     }
-    formatTradeMessage(walletAddress, signature, action, label) {
-        const isBuy = action.type === 'BUY';
-        const emoji = isBuy ? '🟢' : '🔴';
+    formatTradeMessage(walletAddress, signature, action, label, extra) {
+        const { type } = action;
+        const emoji = type === 'BUY' ? '🟢' : type === 'SELL' ? '🔴' : '🔄';
         const labelLine = label ? `🏷 <b>${label}</b>\n` : '';
-        const short = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+        const walletShort = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+        const SOL_MINT = 'So11111111111111111111111111111111111111112';
+        const tokenLabel = (name, symbol) => name && symbol ? `${name} (${symbol})` : symbol || name || '???';
+        const caLine = (mint) => `   📋 CA: <code>${mint ?? SOL_MINT}</code>\n`;
+        const fmtAmount = (amount, symbol) => `<b>${amount.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${symbol}</b>`;
         const usdLine = action.usdValue > 0
-            ? `💵 Value: <b>~$${action.usdValue.toFixed(2)}</b>\n`
+            ? `💵 Trade Value:  <b>~$${action.usdValue.toFixed(2)}</b>\n`
             : '';
-        const tokenAmountLine = action.tokenAmount > 0
-            ? `🪙 Tokens: <b>${action.tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</b>\n`
+        const paidPerToken = action.inMint && action.inAmount > 0 && action.usdValue > 0
+            ? action.usdValue / action.inAmount : 0;
+        const paidLine = paidPerToken > 0
+            ? `💲 Paid/token:   <b>$${paidPerToken < 0.0001 ? paidPerToken.toExponential(4) : paidPerToken.toFixed(6)}</b>\n`
             : '';
-        const pricePerToken = action.tokenAmount > 0 && action.usdValue > 0
-            ? `📊 Price paid: <b>$${(action.usdValue / action.tokenAmount).toExponential(4)}</b> per token\n`
+        const marketLine = extra?.marketPrice && extra.marketPrice > 0
+            ? `📊 Mkt price:    <b>$${extra.marketPrice < 0.0001 ? extra.marketPrice.toExponential(4) : extra.marketPrice.toFixed(6)}</b>\n`
             : '';
-        const links = action.tokenMint
-            ? `🔗 <a href="https://dexscreener.com/solana/${action.tokenMint}">Chart</a>  ·  <a href="https://solscan.io/token/${action.tokenMint}">Token</a>  ·  <a href="https://solscan.io/tx/${signature}">TX</a>`
-            : `🔗 <a href="https://solscan.io/tx/${signature}">View Transaction</a>`;
-        return (`${emoji} <b>${isBuy ? '🟢 BUY' : '🔴 SELL'}</b>\n` +
+        let impactLine = '';
+        if (extra?.priceImpact !== null && extra?.priceImpact !== undefined) {
+            const pi = extra.priceImpact;
+            const piEmoji = pi > 5 ? '🔴' : pi > 2 ? '🟡' : '🟢';
+            impactLine = `${piEmoji} Price impact: <b>${pi >= 0 ? '+' : ''}${pi.toFixed(2)}%</b>\n`;
+        }
+        const solPriceLine = extra?.solPrice && extra.solPrice > 0
+            ? `◎ SOL price:    <b>$${extra.solPrice.toFixed(2)}</b>\n`
+            : '';
+        const feeLine = extra && extra.txFeeSol > 0
+            ? `⛽ Tx fee:       <b>${extra.txFeeSol.toFixed(6)} SOL</b>${extra.txFeeUsd > 0 ? ` (~$${extra.txFeeUsd.toFixed(4)})` : ''}\n`
+            : '';
+        const timeLine = extra?.txTime ? `🕐 <b>${extra.txTime}</b>\n` : '';
+        const sigShort = `${signature.slice(0, 8)}...${signature.slice(-6)}`;
+        const primaryMint = action.inMint ?? action.outMint;
+        const links = primaryMint
+            ? `<a href="https://dexscreener.com/solana/${primaryMint}">DexScreener</a>  ·  ` +
+                `<a href="https://solscan.io/token/${primaryMint}">Solscan</a>  ·  ` +
+                `<a href="https://birdeye.so/token/${primaryMint}?chain=solana">Birdeye</a>  ·  ` +
+                `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`
+            : `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`;
+        return (`${emoji} <b>${type}</b>\n` +
             `━━━━━━━━━━━━━━━━━━━━\n` +
             labelLine +
-            `👛 <a href="https://solscan.io/account/${walletAddress}">${short}</a>\n` +
-            `🏷 Token: <b>${action.tokenSymbol}</b>\n` +
-            tokenAmountLine +
-            `◎ SOL: <b>${action.solAmount.toFixed(4)} SOL</b>\n` +
-            usdLine +
-            pricePerToken +
+            `👛 <a href="https://solscan.io/account/${walletAddress}">${walletShort}</a>  ${timeLine}` +
+            `\n` +
+            `📤 <b>Spent</b>\n` +
+            `   ${fmtAmount(action.outAmount, action.outSymbol)}\n` +
+            `   🪙 ${tokenLabel(action.outName, action.outSymbol)}\n` +
+            caLine(action.outMint) +
+            `\n` +
+            `📥 <b>Received</b>\n` +
+            `   ${fmtAmount(action.inAmount, action.inSymbol)}\n` +
+            `   🪙 ${tokenLabel(action.inName, action.inSymbol)}\n` +
+            caLine(action.inMint) +
             `━━━━━━━━━━━━━━━━━━━━\n` +
-            links);
+            usdLine +
+            paidLine +
+            marketLine +
+            impactLine +
+            solPriceLine +
+            feeLine +
+            `━━━━━━━━━━━━━━━━━━━━\n` +
+            `🔗 ${links}`);
     }
     bar(value, total) {
         if (total === 0)

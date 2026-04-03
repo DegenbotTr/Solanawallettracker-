@@ -30,6 +30,7 @@ export declare class SolanaService implements OnModuleInit, OnModuleDestroy {
     getTxHistory(address: string): Promise<string>;
     getTokenPrice(mintOrSymbol: string): Promise<string>;
     private handleTransaction;
+    private fetchTokenMeta;
     private detectAction;
     private formatTradeMessage;
     private bar;
