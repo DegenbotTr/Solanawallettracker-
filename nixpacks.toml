@@ -5,7 +5,7 @@ nixPkgs = ["nodejs", "pnpm"]
 cmds = ["pnpm install --frozen-lockfile"]
 
 [phases.build]
-cmds = ["pnpm run build"]
+cmds = ["pnpm prisma generate", "pnpm run build"]
 
 [start]
 cmd = "node dist/main"
