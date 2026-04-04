@@ -1,0 +1,63 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id             BigInt           @id // Telegram chatId
+  username       String?
+  minTradeSize   Float            @default(0)
+  firstSeen      DateTime         @default(now())
+  lastSeen       DateTime         @updatedAt
+  
+  // Relations
+  watchedWallets WatchedWallet[]
+}
+
+model Wallet {
+  address        String           @id // Solana address
+  
+  // Relations
+  watchers       WatchedWallet[]
+  trades         Trade[]
+}
+
+model WatchedWallet {
+  user           User             @relation(fields: [userId], references: [id])
+  userId         BigInt
+  wallet         Wallet           @relation(fields: [walletAddress], references: [address])
+  walletAddress  String
+  label          String?
+  tags           String[]         @default([]) // Array of tags: "whale", "degen", "smart-money", etc.
+
+  @@id([userId, walletAddress]) // Composite primary key
+}
+
+model Trade {
+  id             String           @id @default(cuid())
+  walletAddress  String
+  wallet         Wallet           @relation(fields: [walletAddress], references: [address])
+  type           String           // 'BUY' | 'SELL' | 'SWAP'
+  tokenMint      String           // the primary token (received on BUY, spent on SELL)
+  tokenSymbol    String
+  tokenName      String           @default("")
+  tokenAmount    Float            // amount of token
+  priceUsd       Float            @default(0) // price per token at trade time
+  totalUsd       Float            @default(0) // total USD value
+  marketCapUsd   Float            @default(0) // mcap at trade time
+  solAmount      Float            @default(0)
+  signature      String           @unique
+  timestamp      DateTime         @default(now())
+
+  @@index([walletAddress, tokenMint])
+  @@index([walletAddress, timestamp])
+}

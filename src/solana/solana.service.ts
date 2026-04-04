@@ -12,43 +12,8 @@ import {
 } from '@solana/web3.js';
 import { InjectBot } from 'nestjs-telegraf';
 import { Telegraf } from 'telegraf';
+import { PrismaService } from '../prisma/prisma.service';
 
-// Per-chat min trade size filter (USD), default 0 = all trades
-const minTradeSize = new Map<number, number>();
-
-// Per-user wallet labels: chatId -> { address -> label }
-const walletLabels = new Map<number, Map<string, string>>();
-
-// Trade history: walletAddress -> mint -> trades[]
-interface TradeRecord {
-  type: 'BUY' | 'SELL';
-  tokenSymbol: string;
-  tokenName: string;
-  tokenAmount: number;
-  priceUsd: number; // price per token at trade time
-  totalUsd: number; // total USD value of trade
-  marketCapUsd: number; // mcap at trade time (0 if unknown)
-  timestamp: Date;
-  signature: string;
-}
-const tradeHistory = new Map<string, Map<string, TradeRecord[]>>();
-
-function recordTrade(walletAddress: string, mint: string, record: TradeRecord) {
-  if (!tradeHistory.has(walletAddress))
-    tradeHistory.set(walletAddress, new Map());
-  const byMint = tradeHistory.get(walletAddress);
-  if (!byMint.has(mint)) byMint.set(mint, []);
-  const trades = byMint.get(mint);
-  // Keep last 50 trades per token per wallet
-  trades.push(record);
-  if (trades.length > 50) trades.shift();
-}
-
-// Track all users who have interacted with the bot
-const allUsers = new Map<
-  number,
-  { username: string; firstSeen: Date; lastSeen: Date }
->();
 const startTime = new Date();
 
 @Injectable()
@@ -63,10 +28,11 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private config: ConfigService,
+    private prisma: PrismaService,
     @InjectBot() private bot: Telegraf,
-  ) {}
+  ) { }
 
-  onModuleInit() {
+  async onModuleInit() {
     this.apiKey = this.config.get<string>('HELIUS_API_KEY');
     const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${this.apiKey}`;
     const wsUrl = `wss://mainnet.helius-rpc.com/?api-key=${this.apiKey}`;
@@ -76,19 +42,49 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       commitment: 'confirmed',
     });
 
+    // Restore ALL watched wallets from the database on startup
+    const allWatched = await this.prisma.wallet.findMany({
+      include: { watchers: true },
+    });
+
+    for (const w of allWatched) {
+      if (w.watchers.length > 0) {
+        // null chatId because we just want to start the WebSocket, chatIds are in DB
+        await this.initWalletSubscription(w.address);
+      }
+    }
+
     const envWallets = this.config.get<string>('WATCHED_WALLETS', '');
     if (envWallets) {
-      envWallets.split(',').forEach((addr) => {
+      for (const addr of envWallets.split(',')) {
         const trimmed = addr.trim();
-        if (trimmed) this.watchWallet(trimmed, null);
-      });
+        if (trimmed) await this.watchWallet(trimmed, null);
+      }
     }
   }
 
   onModuleDestroy() {
     this.watchedWallets.forEach(({ subId }) => {
-      this.connection.removeOnLogsListener(subId).catch(() => {});
+      this.connection.removeOnLogsListener(subId).catch(() => { });
     });
+  }
+  private async initWalletSubscription(address: string): Promise<number> {
+    if (this.watchedWallets.has(address)) {
+      return this.watchedWallets.get(address).subId;
+    }
+
+    const subId = this.connection.onLogs(
+      new PublicKey(address),
+      async (logs) => {
+        if (logs.err) return;
+        await this.handleTransaction(address, logs.signature);
+      },
+      'confirmed',
+    );
+
+    this.watchedWallets.set(address, { subId, chatIds: new Set() });
+    this.logger.log(`Subscription active for: ${address}`);
+    return subId;
   }
 
   // ─── Wallet Watch ────────────────────────────────────────────────────────────
@@ -129,59 +125,204 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       return false;
     }
 
-    if (this.watchedWallets.has(address)) {
-      if (chatId) this.watchedWallets.get(address).chatIds.add(chatId);
-      return true;
-    }
-
-    const subId = this.connection.onLogs(
-      new PublicKey(address),
-      async (logs) => {
-        if (logs.err) return;
-        await this.handleTransaction(address, logs.signature);
-      },
-      'confirmed',
-    );
-
-    const chatIds = new Set<number>();
-    if (chatId) chatIds.add(chatId);
-    this.watchedWallets.set(address, { subId, chatIds });
-    this.logger.log(`Watching wallet: ${address}`);
-    return true;
-  }
-
-  unwatchWallet(address: string, chatId: number): boolean {
-    const entry = this.watchedWallets.get(address);
-    if (!entry) return false;
-    entry.chatIds.delete(chatId);
-    if (entry.chatIds.size === 0) {
-      this.connection.removeOnLogsListener(entry.subId).catch(() => {});
-      this.watchedWallets.delete(address);
-    }
-    return true;
-  }
-
-  getWatchedWallets(chatId: number): { address: string; label: string }[] {
-    const result: { address: string; label: string }[] = [];
-    const labels = walletLabels.get(chatId) ?? new Map();
-    this.watchedWallets.forEach((entry, address) => {
-      if (entry.chatIds.has(chatId)) {
-        result.push({ address, label: labels.get(address) ?? '' });
-      }
+    // 1. Ensure wallet exists in DB
+    await this.prisma.wallet.upsert({
+      where: { address },
+      create: { address },
+      update: {},
     });
-    return result;
-  }
 
-  setWalletLabel(chatId: number, address: string, label: string): boolean {
-    const entry = this.watchedWallets.get(address);
-    if (!entry || !entry.chatIds.has(chatId)) return false;
-    if (!walletLabels.has(chatId)) walletLabels.set(chatId, new Map());
-    walletLabels.get(chatId).set(address, label);
+    // 2. Add user-wallet link (WatchedWallet)
+    if (chatId) {
+      // Ensure user exists (best effort)
+      await this.prisma.user.upsert({
+        where: { id: chatId },
+        create: { id: chatId },
+        update: {},
+      });
+
+      await this.prisma.watchedWallet.upsert({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        create: { userId: chatId, walletAddress: address },
+        update: {},
+      });
+    }
+
+    // 3. Ensure WebSocket listener is active
+    await this.initWalletSubscription(address);
     return true;
   }
 
-  getWalletLabel(chatId: number, address: string): string {
-    return walletLabels.get(chatId)?.get(address) ?? '';
+  async unwatchWallet(address: string, chatId: number): Promise<boolean> {
+    try {
+      // Remove the join record
+      await this.prisma.watchedWallet.delete({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+      });
+
+      // Check if anyone else is still watching this wallet
+      const otherWatchers = await this.prisma.watchedWallet.count({
+        where: { walletAddress: address },
+      });
+
+      if (otherWatchers === 0) {
+        const entry = this.watchedWallets.get(address);
+        if (entry) {
+          this.connection.removeOnLogsListener(entry.subId).catch(() => { });
+          this.watchedWallets.delete(address);
+        }
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async getWatchedWallets(
+    chatId: number,
+  ): Promise<{ address: string; label: string }[]> {
+    const list = await this.prisma.watchedWallet.findMany({
+      where: { userId: chatId },
+      select: { walletAddress: true, label: true },
+    });
+    return list.map((item) => ({
+      address: item.walletAddress,
+      label: item.label ?? '',
+    }));
+  }
+
+  async setWalletLabel(
+    chatId: number,
+    address: string,
+    label: string,
+  ): Promise<boolean> {
+    try {
+      await this.prisma.watchedWallet.update({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        data: { label },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getWalletLabel(chatId: number, address: string): Promise<string> {
+    const entry = await this.prisma.watchedWallet.findUnique({
+      where: {
+        userId_walletAddress: { userId: chatId, walletAddress: address },
+      },
+      select: { label: true },
+    });
+    return entry?.label ?? '';
+  }
+  // ─── Wallet Tags ─────────────────────────────────────────────────────────────
+  // Note: Tags functionality requires Prisma array operations support
+  // These methods are available but may need schema adjustments
+
+  async addWalletTag(
+    chatId: number,
+    address: string,
+    tag: string,
+  ): Promise<boolean> {
+    try {
+      const entry = await this.prisma.watchedWallet.findUnique({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        select: { tags: true },
+      });
+      if (!entry) return false;
+
+      const normalizedTag = tag.toLowerCase().trim();
+      if (entry.tags.includes(normalizedTag)) return true; // already has tag
+
+      const newTags = [...entry.tags, normalizedTag];
+      await this.prisma.watchedWallet.update({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        data: { tags: newTags },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async removeWalletTag(
+    chatId: number,
+    address: string,
+    tag: string,
+  ): Promise<boolean> {
+    try {
+      const entry = await this.prisma.watchedWallet.findUnique({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        select: { tags: true },
+      });
+      if (!entry) return false;
+
+      const normalizedTag = tag.toLowerCase().trim();
+      const newTags = entry.tags.filter((t) => t !== normalizedTag);
+
+      await this.prisma.watchedWallet.update({
+        where: {
+          userId_walletAddress: { userId: chatId, walletAddress: address },
+        },
+        data: { tags: newTags },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getWalletTags(chatId: number, address: string): Promise<string[]> {
+    const entry = await this.prisma.watchedWallet.findUnique({
+      where: {
+        userId_walletAddress: { userId: chatId, walletAddress: address },
+      },
+      select: { tags: true },
+    });
+    return entry?.tags ?? [];
+  }
+
+  async getWalletsByTag(
+    chatId: number,
+    tag: string,
+  ): Promise<{ address: string; label: string }[]> {
+    const normalizedTag = tag.toLowerCase().trim();
+    const wallets = await this.prisma.watchedWallet.findMany({
+      where: {
+        userId: chatId,
+        tags: {
+          has: normalizedTag,
+        },
+      },
+      select: { walletAddress: true, label: true },
+    });
+    return wallets.map((w) => ({
+      address: w.walletAddress,
+      label: w.label ?? '',
+    }));
+  }
+
+  async getAllTags(chatId: number): Promise<string[]> {
+    const wallets = await this.prisma.watchedWallet.findMany({
+      where: { userId: chatId },
+      select: { tags: true },
+    });
+    const allTags = new Set<string>();
+    wallets.forEach((w) => w.tags.forEach((t) => allTags.add(t)));
+    return Array.from(allTags).sort();
   }
 
   // ─── Chain Detection ─────────────────────────────────────────────────────────
@@ -238,32 +379,38 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
   // ─── Min Trade Filter ────────────────────────────────────────────────────────
 
-  setMinTradeSize(chatId: number, usd: number): void {
-    minTradeSize.set(chatId, usd);
+  async setMinTradeSize(chatId: number, usd: number): Promise<void> {
+    await this.prisma.user.upsert({
+      where: { id: chatId },
+      create: { id: chatId, minTradeSize: usd },
+      update: { minTradeSize: usd },
+    });
   }
 
-  getMinTradeSize(chatId: number): number {
-    return minTradeSize.get(chatId) ?? 0;
+  async getMinTradeSize(chatId: number): Promise<number> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: chatId },
+      select: { minTradeSize: true },
+    });
+    return user?.minTradeSize ?? 0;
   }
 
   // ─── User Tracking ───────────────────────────────────────────────────────────
 
-  trackUser(chatId: number, username: string): void {
-    const now = new Date();
-    if (allUsers.has(chatId)) {
-      allUsers.get(chatId).lastSeen = now;
-    } else {
-      allUsers.set(chatId, { username, firstSeen: now, lastSeen: now });
-    }
+  async trackUser(chatId: number, username: string): Promise<void> {
+    await this.prisma.user.upsert({
+      where: { id: chatId },
+      create: { id: chatId, username },
+      update: { username, lastSeen: new Date() },
+    });
   }
 
-  getStats(): string {
-    const totalUsers = allUsers.size;
-    const totalWallets = this.watchedWallets.size;
-    const activeWatchers = new Set<number>();
-    this.watchedWallets.forEach(({ chatIds }) =>
-      chatIds.forEach((id) => activeWatchers.add(id)),
-    );
+  async getStats(): Promise<string> {
+    const totalUsers = await this.prisma.user.count();
+    const totalWallets = await this.prisma.wallet.count();
+    const activeWatchers = await this.prisma.watchedWallet.groupBy({
+      by: ['userId'],
+    });
 
     const uptimeMs = Date.now() - startTime.getTime();
     const hours = Math.floor(uptimeMs / 3600000);
@@ -274,7 +421,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       `│ 📊 <b>BOT STATS</b>`,
       `└─────────────────────────────\n`,
       `👥 Total users: <b>${totalUsers}</b>`,
-      `👁 Active watchers: <b>${activeWatchers.size}</b>`,
+      `👁 Active watchers: <b>${activeWatchers.length}</b>`,
       `👛 Wallets being tracked: <b>${totalWallets}</b>`,
       `⏱ Uptime: <b>${hours}h ${minutes}m</b>`,
     ].join('\n');
@@ -452,11 +599,11 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
       const time = sig.blockTime
         ? new Date(sig.blockTime * 1000).toLocaleString('en-US', {
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-          })
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        })
         : 'Unknown time';
 
       const status = sig.err ? '❌' : '✅';
@@ -510,7 +657,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
             );
             const tokenAmt = Math.abs(
               (changed.uiTokenAmount.uiAmount ?? 0) -
-                (preEntry?.uiTokenAmount.uiAmount ?? 0),
+              (preEntry?.uiTokenAmount.uiAmount ?? 0),
             );
             const mintShort = `${changed.mint.slice(0, 6)}...${changed.mint.slice(-4)}`;
             const pricePerToken = tokenAmt > 0 ? usdAmt / tokenAmt : 0;
@@ -649,12 +796,12 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       // Tx timestamp
       const txTime = tx.blockTime
         ? new Date(tx.blockTime * 1000).toLocaleString('en-US', {
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-          })
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
         : null;
 
       // Price impact: difference between what was paid vs market price
@@ -672,11 +819,18 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       const entry = this.watchedWallets.get(walletAddress);
       if (!entry) return;
 
-      entry.chatIds.forEach((chatId) => {
-        const min = minTradeSize.get(chatId) ?? 0;
-        if (action.usdValue < min) return;
+      // Fetch all users watching this wallet from DB
+      const watchers = await this.prisma.watchedWallet.findMany({
+        where: { walletAddress },
+        include: { user: true },
+      });
 
-        const label = this.getWalletLabel(chatId, walletAddress);
+      for (const watcher of watchers) {
+        const chatId = Number(watcher.userId);
+        const min = watcher.user.minTradeSize;
+        if (action.usdValue < min) continue;
+
+        const label = watcher.label ?? '';
         const message = this.formatTradeMessage(
           walletAddress,
           signature,
@@ -703,17 +857,17 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
                 ],
                 ...(primaryMintForButtons
                   ? [
-                      [
-                        {
-                          text: '📈 Chart',
-                          url: `https://dexscreener.com/solana/${primaryMintForButtons}`,
-                        },
-                        {
-                          text: '🐦 Birdeye',
-                          url: `https://birdeye.so/token/${primaryMintForButtons}?chain=solana`,
-                        },
-                      ],
-                    ]
+                    [
+                      {
+                        text: '📈 Chart',
+                        url: `https://dexscreener.com/solana/${primaryMintForButtons}`,
+                      },
+                      {
+                        text: '🐦 Birdeye',
+                        url: `https://birdeye.so/token/${primaryMintForButtons}?chain=solana`,
+                      },
+                    ],
+                  ]
                   : []),
                 [
                   {
@@ -731,7 +885,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
           .catch((err) => {
             this.logger.error(`Failed to send to ${chatId}: ${err.message}`);
           });
-      });
+      }
     } catch (err) {
       this.logger.error(`Error handling tx ${signature}: ${err.message}`);
     }
@@ -997,9 +1151,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     const primaryMint = action.inMint ?? action.outMint;
     const links = primaryMint
       ? `<a href="https://dexscreener.com/solana/${primaryMint}">DexScreener</a>  ·  ` +
-        `<a href="https://solscan.io/token/${primaryMint}">Solscan</a>  ·  ` +
-        `<a href="https://birdeye.so/token/${primaryMint}?chain=solana">Birdeye</a>  ·  ` +
-        `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`
+      `<a href="https://solscan.io/token/${primaryMint}">Solscan</a>  ·  ` +
+      `<a href="https://birdeye.so/token/${primaryMint}?chain=solana">Birdeye</a>  ·  ` +
+      `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`
       : `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`;
 
     return (
@@ -1027,6 +1181,115 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `🔗 ${links}`
     );
+  }
+
+  // ─── Backfill & PnL ──────────────────────────────────────────────────────────
+
+  async backfillTrades(
+    address: string,
+    limit: number,
+  ): Promise<{ success: boolean; message: string }> {
+    try {
+      new PublicKey(address);
+    } catch {
+      return { success: false, message: 'Invalid Solana address' };
+    }
+
+    try {
+      const sigsRes = await this.connection.getSignaturesForAddress(
+        new PublicKey(address),
+        { limit },
+      );
+
+      if (!sigsRes.length) {
+        return { success: false, message: 'No transactions found' };
+      }
+
+      let processed = 0;
+      let errors = 0;
+
+      for (const sig of sigsRes) {
+        try {
+          const tx = await this.connection.getParsedTransaction(sig.signature, {
+            maxSupportedTransactionVersion: 0,
+          });
+          if (!tx || sig.err) continue;
+
+          const action = this.detectAction(tx, address);
+          if (!action) continue;
+
+          // Store trade in database
+          await this.prisma.trade.upsert({
+            where: { signature: sig.signature },
+            create: {
+              walletAddress: address,
+              type: action.type,
+              tokenMint: action.tokenMint,
+              tokenSymbol: action.tokenSymbol,
+              tokenName: action.tokenName,
+              tokenAmount: action.tokenAmount,
+              solAmount: action.solAmount,
+              signature: sig.signature,
+              timestamp: sig.blockTime ? new Date(sig.blockTime * 1000) : new Date(),
+            },
+            update: {},
+          });
+          processed++;
+        } catch {
+          errors++;
+        }
+      }
+
+      return {
+        success: true,
+        message: `Backfilled ${processed} trades${errors > 0 ? ` (${errors} errors)` : ''}`,
+      };
+    } catch (err) {
+      return { success: false, message: `Error: ${err.message}` };
+    }
+  }
+
+  async getPnlAnalysis(address: string): Promise<string> {
+    try {
+      new PublicKey(address);
+    } catch {
+      throw new Error('invalid_address');
+    }
+
+    const trades = await this.prisma.trade.findMany({
+      where: { walletAddress: address },
+      orderBy: { timestamp: 'asc' },
+    });
+
+    if (!trades.length) return '📭 No trades found for PnL analysis.';
+
+    let totalBuyUsd = 0;
+    let totalSellUsd = 0;
+    let pnl = 0;
+
+    for (const trade of trades) {
+      if (trade.type === 'BUY') {
+        totalBuyUsd += trade.totalUsd;
+      } else if (trade.type === 'SELL') {
+        totalSellUsd += trade.totalUsd;
+      }
+    }
+
+    pnl = totalSellUsd - totalBuyUsd;
+    const pnlPct = totalBuyUsd > 0 ? (pnl / totalBuyUsd) * 100 : 0;
+    const emoji = pnl >= 0 ? '📈' : '📉';
+
+    return [
+      `┌─────────────────────────────`,
+      `│ 📊 <b>PnL ANALYSIS</b>`,
+      `│ 👛 ${address.slice(0, 6)}...${address.slice(-4)}`,
+      `└─────────────────────────────\n`,
+      `${emoji} <b>Total PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USD</b>`,
+      `� Total Bought: <b>${totalBuyUsd.toFixed(2)} USD</b>`,
+      `📉 Total Sold: <b>${totalSellUsd.toFixed(2)} USD</b>`,
+      `📊 Return: <b>${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%</b>`,
+      `🔢 Trades: <b>${trades.length}</b>`,
+    ].join('\n');
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
