@@ -30,7 +30,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     private config: ConfigService,
     private prisma: PrismaService,
     @InjectBot() private bot: Telegraf,
-  ) { }
+  ) {}
 
   async onModuleInit() {
     this.apiKey = this.config.get<string>('HELIUS_API_KEY');
@@ -65,7 +65,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy() {
     this.watchedWallets.forEach(({ subId }) => {
-      this.connection.removeOnLogsListener(subId).catch(() => { });
+      this.connection.removeOnLogsListener(subId).catch(() => {});
     });
   }
   private async initWalletSubscription(address: string): Promise<number> {
@@ -172,7 +172,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       if (otherWatchers === 0) {
         const entry = this.watchedWallets.get(address);
         if (entry) {
-          this.connection.removeOnLogsListener(entry.subId).catch(() => { });
+          this.connection.removeOnLogsListener(entry.subId).catch(() => {});
           this.watchedWallets.delete(address);
         }
       }
@@ -599,11 +599,11 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
       const time = sig.blockTime
         ? new Date(sig.blockTime * 1000).toLocaleString('en-US', {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-        })
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          })
         : 'Unknown time';
 
       const status = sig.err ? '❌' : '✅';
@@ -657,7 +657,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
             );
             const tokenAmt = Math.abs(
               (changed.uiTokenAmount.uiAmount ?? 0) -
-              (preEntry?.uiTokenAmount.uiAmount ?? 0),
+                (preEntry?.uiTokenAmount.uiAmount ?? 0),
             );
             const mintShort = `${changed.mint.slice(0, 6)}...${changed.mint.slice(-4)}`;
             const pricePerToken = tokenAmt > 0 ? usdAmt / tokenAmt : 0;
@@ -735,6 +735,63 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       const action = this.detectAction(tx, walletAddress);
       if (!action) return;
 
+      // Handle transfer notifications separately
+      if (action.type === 'TRANSFER') {
+        // Fetch token metadata if it's a token transfer
+        if (action.outMint) {
+          const meta = await this.fetchTokenMeta(action.outMint);
+          action.outName = meta.name || action.outName;
+          action.outSymbol = meta.symbol || action.outSymbol;
+        }
+
+        const watchers = await this.prisma.watchedWallet.findMany({
+          where: { walletAddress },
+          include: { user: true },
+        });
+        for (const watcher of watchers) {
+          const chatId = Number(watcher.userId);
+          const label = watcher.label ?? '';
+          const message = this.formatTransferMessage(
+            walletAddress,
+            signature,
+            action,
+            label,
+          );
+          this.bot.telegram
+            .sendMessage(chatId, message, {
+              parse_mode: 'HTML',
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    {
+                      text: '🔍 TX on Solscan',
+                      url: `https://solscan.io/tx/${signature}`,
+                    },
+                    {
+                      text: '👛 Wallet',
+                      url: `https://solscan.io/account/${walletAddress}`,
+                    },
+                  ],
+                  ...(action.transferTo
+                    ? [
+                        [
+                          {
+                            text: '📬 Recipient',
+                            url: `https://solscan.io/account/${action.transferTo}`,
+                          },
+                        ],
+                      ]
+                    : []),
+                ],
+              },
+            })
+            .catch((err) => {
+              this.logger.error(`Failed to send to ${chatId}: ${err.message}`);
+            });
+        }
+        return;
+      }
+
       // Fetch current SOL price to calculate USD value of the trade
       let solPrice = 0;
       try {
@@ -796,12 +853,12 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       // Tx timestamp
       const txTime = tx.blockTime
         ? new Date(tx.blockTime * 1000).toLocaleString('en-US', {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-        })
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
         : null;
 
       // Price impact: difference between what was paid vs market price
@@ -857,17 +914,17 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
                 ],
                 ...(primaryMintForButtons
                   ? [
-                    [
-                      {
-                        text: '📈 Chart',
-                        url: `https://dexscreener.com/solana/${primaryMintForButtons}`,
-                      },
-                      {
-                        text: '🐦 Birdeye',
-                        url: `https://birdeye.so/token/${primaryMintForButtons}?chain=solana`,
-                      },
-                    ],
-                  ]
+                      [
+                        {
+                          text: '📈 Chart',
+                          url: `https://dexscreener.com/solana/${primaryMintForButtons}`,
+                        },
+                        {
+                          text: '🐦 Birdeye',
+                          url: `https://birdeye.so/token/${primaryMintForButtons}?chain=solana`,
+                        },
+                      ],
+                    ]
                   : []),
                 [
                   {
@@ -926,16 +983,16 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     tx: ParsedTransactionWithMeta,
     walletAddress: string,
   ): {
-    type: 'BUY' | 'SELL' | 'SWAP';
+    type: 'BUY' | 'SELL' | 'SWAP' | 'TRANSFER';
     // "in" = what the wallet received
     inSymbol: string;
     inName: string;
-    inMint: string | null; // null = native SOL
+    inMint: string | null;
     inAmount: number;
     // "out" = what the wallet spent
     outSymbol: string;
     outName: string;
-    outMint: string | null; // null = native SOL
+    outMint: string | null;
     outAmount: number;
     usdValue: number;
     // legacy compat
@@ -944,6 +1001,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     tokenMint: string;
     tokenAmount: number;
     solAmount: number;
+    // transfer-specific
+    transferTo?: string;
+    transferFrom?: string;
   } | null {
     const accountKeys = tx.transaction.message.accountKeys;
     const walletIndex = accountKeys.findIndex(
@@ -993,8 +1053,40 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     // Nothing meaningful happened
     if (!solIn && !solOut && tokenDeltas.length === 0) return null;
 
-    // Plain SOL transfer (no tokens involved) — skip
-    if (tokenDeltas.length === 0) return null;
+    // Plain SOL transfer (no tokens involved) — detect recipient
+    if (tokenDeltas.length === 0) {
+      if (!solOut) return null;
+      const recipientIndex = (tx.meta?.postBalances ?? []).findIndex(
+        (bal, i) =>
+          i !== walletIndex &&
+          ((tx.meta!.postBalances![i] ?? 0) - (tx.meta!.preBalances![i] ?? 0)) /
+            1e9 >
+            0.001,
+      );
+      const transferTo =
+        recipientIndex >= 0
+          ? ((accountKeys[recipientIndex] as any)?.pubkey?.toString() ??
+            accountKeys[recipientIndex]?.toString())
+          : undefined;
+      return {
+        type: 'TRANSFER',
+        inMint: null,
+        inName: 'Solana',
+        inSymbol: 'SOL',
+        inAmount: 0,
+        outMint: null,
+        outName: 'Solana',
+        outSymbol: 'SOL',
+        outAmount: Math.abs(solChange),
+        usdValue: 0,
+        tokenMint: '',
+        tokenSymbol: 'SOL',
+        tokenName: 'Solana',
+        tokenAmount: 0,
+        solAmount: Math.abs(solChange),
+        transferTo,
+      };
+    }
 
     // ── Determine IN / OUT sides ──────────────────────────────────────────────
 
@@ -1011,11 +1103,11 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       outMint = null;
       outAmount = Math.abs(solChange);
     } else if (solIn && tokensOut.length > 0) {
-      // Token → SOL  (classic SELL, or "buy SOL with token")
+      // Token → SOL  (classic SELL)
       const t = tokensOut[0];
-      inMint = null; // received SOL
+      inMint = null;
       inAmount = solChange;
-      outMint = t.mint; // spent token
+      outMint = t.mint;
       outAmount = Math.abs(t.delta);
     } else if (tokensIn.length > 0 && tokensOut.length > 0) {
       // Token → Token swap
@@ -1023,20 +1115,34 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       inAmount = tokensIn[0].delta;
       outMint = tokensOut[0].mint;
       outAmount = Math.abs(tokensOut[0].delta);
+    } else if (tokensOut.length > 0) {
+      // Token sent out with no swap — transfer out
+      const t = tokensOut[0];
+      const recipient = postTokenBalances.find(
+        (b) => b.mint === t.mint && b.owner !== walletAddress,
+      );
+      return {
+        type: 'TRANSFER',
+        inMint: null,
+        inName: '',
+        inSymbol: 'SOL',
+        inAmount: 0,
+        outMint: t.mint,
+        outName: '',
+        outSymbol: t.mint.slice(0, 6) + '...' + t.mint.slice(-4),
+        outAmount: Math.abs(t.delta),
+        usdValue: 0,
+        tokenMint: t.mint,
+        tokenSymbol: t.mint.slice(0, 6) + '...' + t.mint.slice(-4),
+        tokenName: '',
+        tokenAmount: Math.abs(t.delta),
+        solAmount: 0,
+        transferTo: recipient?.owner,
+      };
     } else {
       return null;
     }
-
-    // ── Classify type ─────────────────────────────────────────────────────────
-    // BUY  = received a non-SOL token
-    // SELL = spent a non-SOL token and received SOL
-    // SWAP = token-to-token
-    const type =
-      inMint !== null && outMint !== null
-        ? 'SWAP'
-        : inMint !== null
-          ? 'BUY'
-          : 'SELL';
+    const type = 'SWAP';
 
     const shortMint = (m: string) => `${m.slice(0, 6)}...${m.slice(-4)}`;
 
@@ -1064,11 +1170,55 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private formatTransferMessage(
+    walletAddress: string,
+    signature: string,
+    action: {
+      outMint: string | null;
+      outAmount: number;
+      outSymbol: string;
+      outName: string;
+      solAmount: number;
+      transferTo?: string;
+    },
+    label?: string,
+  ): string {
+    const walletShort = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+    const labelLine = label ? `🏷 <b>${label}</b>\n` : '';
+    const toShort = action.transferTo
+      ? `${action.transferTo.slice(0, 6)}...${action.transferTo.slice(-4)}`
+      : 'Unknown';
+
+    const assetLine = action.outMint
+      ? `🪙 Token: <b>${action.outName || action.outSymbol}</b>\n` +
+        `🟡 Amount: <b>${action.outAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</b>\n` +
+        `📋 CA: <code>${action.outMint}</code>\n`
+      : `◎ SOL: <b>${action.solAmount.toFixed(4)} SOL</b>\n`;
+
+    const recipientLine = action.transferTo
+      ? `📬 To: <code>${action.transferTo}</code>\n`
+      : `📬 To: Unknown\n`;
+
+    return (
+      `📤 <b>TRANSFER</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      labelLine +
+      `👛 ${walletShort}\n` +
+      assetLine +
+      recipientLine +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `🔗 <a href="https://solscan.io/tx/${signature}">View TX</a>` +
+      (action.transferTo
+        ? `  ·  <a href="https://solscan.io/account/${action.transferTo}">${toShort}</a>`
+        : '')
+    );
+  }
+
   private formatTradeMessage(
     walletAddress: string,
     signature: string,
     action: {
-      type: 'BUY' | 'SELL' | 'SWAP';
+      type: 'BUY' | 'SELL' | 'SWAP' | 'TRANSFER';
       inSymbol: string;
       inName: string;
       inMint: string | null;
@@ -1095,7 +1245,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     },
   ): string {
     const { type } = action;
-    const emoji = type === 'BUY' ? '🟢' : type === 'SELL' ? '🔴' : '🔄';
+    const emoji = '🔄';
     const labelLine = label ? `🏷 <b>${label}</b>\n` : '';
     const walletShort = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
     const SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -1151,33 +1301,28 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     const primaryMint = action.inMint ?? action.outMint;
     const links = primaryMint
       ? `<a href="https://dexscreener.com/solana/${primaryMint}">DexScreener</a>  ·  ` +
-      `<a href="https://solscan.io/token/${primaryMint}">Solscan</a>  ·  ` +
-      `<a href="https://birdeye.so/token/${primaryMint}?chain=solana">Birdeye</a>  ·  ` +
-      `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`
+        `<a href="https://solscan.io/token/${primaryMint}">Solscan</a>  ·  ` +
+        `<a href="https://birdeye.so/token/${primaryMint}?chain=solana">Birdeye</a>  ·  ` +
+        `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`
       : `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`;
+
+    const boughtMint = action.inMint ?? SOL_MINT;
+    const boughtName = action.inName || action.inSymbol || '???';
+    const solSpent =
+      action.solAmount > 0
+        ? `◎ SOL: <b>${action.solAmount.toFixed(4)} SOL</b>\n`
+        : '';
 
     return (
       `${emoji} <b>${type}</b>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       labelLine +
-      `👛 <a href="https://solscan.io/account/${walletAddress}">${walletShort}</a>  ${timeLine}` +
-      `\n` +
-      `📤 <b>Spent</b>\n` +
-      `   ${fmtAmount(action.outAmount, action.outSymbol)}\n` +
-      `   🪙 ${tokenLabel(action.outName, action.outSymbol)}\n` +
-      caLine(action.outMint) +
-      `\n` +
-      `📥 <b>Received</b>\n` +
-      `   ${fmtAmount(action.inAmount, action.inSymbol)}\n` +
-      `   🪙 ${tokenLabel(action.inName, action.inSymbol)}\n` +
-      caLine(action.inMint) +
-      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `👛 ${walletShort}\n` +
+      `🪙 Token: <b>${boughtName}</b>\n` +
+      `🟡 Tokens: <b>${action.inAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</b>\n` +
+      solSpent +
       usdLine +
-      paidLine +
-      marketLine +
-      impactLine +
-      solPriceLine +
-      feeLine +
+      `📋 CA: <code>${boughtMint}</code>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `🔗 ${links}`
     );
@@ -1230,7 +1375,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
               tokenAmount: action.tokenAmount,
               solAmount: action.solAmount,
               signature: sig.signature,
-              timestamp: sig.blockTime ? new Date(sig.blockTime * 1000) : new Date(),
+              timestamp: sig.blockTime
+                ? new Date(sig.blockTime * 1000)
+                : new Date(),
             },
             update: {},
           });

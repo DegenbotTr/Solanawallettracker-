@@ -825,27 +825,20 @@ let SolanaService = SolanaService_1 = class SolanaService {
                 `<a href="https://birdeye.so/token/${primaryMint}?chain=solana">Birdeye</a>  ·  ` +
                 `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`
             : `<a href="https://solscan.io/tx/${signature}">${sigShort}</a>`;
+        const boughtMint = action.inMint ?? SOL_MINT;
+        const boughtName = action.inName || action.inSymbol || '???';
+        const solSpent = action.solAmount > 0
+            ? `◎ SOL: <b>${action.solAmount.toFixed(4)} SOL</b>\n`
+            : '';
         return (`${emoji} <b>${type}</b>\n` +
             `━━━━━━━━━━━━━━━━━━━━\n` +
             labelLine +
-            `👛 <a href="https://solscan.io/account/${walletAddress}">${walletShort}</a>  ${timeLine}` +
-            `\n` +
-            `📤 <b>Spent</b>\n` +
-            `   ${fmtAmount(action.outAmount, action.outSymbol)}\n` +
-            `   🪙 ${tokenLabel(action.outName, action.outSymbol)}\n` +
-            caLine(action.outMint) +
-            `\n` +
-            `📥 <b>Received</b>\n` +
-            `   ${fmtAmount(action.inAmount, action.inSymbol)}\n` +
-            `   🪙 ${tokenLabel(action.inName, action.inSymbol)}\n` +
-            caLine(action.inMint) +
-            `━━━━━━━━━━━━━━━━━━━━\n` +
+            `👛 ${walletShort}\n` +
+            `🪙 Token: <b>${boughtName}</b>\n` +
+            `🟡 Tokens: <b>${action.inAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</b>\n` +
+            solSpent +
             usdLine +
-            paidLine +
-            marketLine +
-            impactLine +
-            solPriceLine +
-            feeLine +
+            `📋 CA: <code>${boughtMint}</code>\n` +
             `━━━━━━━━━━━━━━━━━━━━\n` +
             `🔗 ${links}`);
     }
@@ -884,7 +877,9 @@ let SolanaService = SolanaService_1 = class SolanaService {
                             tokenAmount: action.tokenAmount,
                             solAmount: action.solAmount,
                             signature: sig.signature,
-                            timestamp: sig.blockTime ? new Date(sig.blockTime * 1000) : new Date(),
+                            timestamp: sig.blockTime
+                                ? new Date(sig.blockTime * 1000)
+                                : new Date(),
                         },
                         update: {},
                     });
