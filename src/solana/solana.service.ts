@@ -726,20 +726,41 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         if (meta.name) action.tokenName = meta.name;
       }
 
-      // ── Fetch market cap from Jupiter ─────────────────────────────────────
+      // ── Fetch market cap from DexScreener ─────────────────────────────────────
       let marketCapUsd = 0;
       let pricePerToken = 0;
       if (action.tokenMint) {
         try {
-          const jr = await fetch(
-            `https://price.jup.ag/v6/price?ids=${action.tokenMint}`,
+          // Try DexScreener first for market cap
+          const dexRes = await fetch(
+            `https://api.dexscreener.com/latest/dex/tokens/${action.tokenMint}`,
           );
-          const jd = await jr.json();
-          pricePerToken = jd?.data?.[action.tokenMint]?.price ?? 0;
+          const dexData = await dexRes.json();
+          if (dexData?.pairs && dexData.pairs.length > 0) {
+            const pair = dexData.pairs[0];
+            marketCapUsd = pair.fdv || pair.marketCap || 0;
+            pricePerToken = parseFloat(pair.priceUsd) || 0;
+          }
         } catch {
           /* best effort */
         }
+
+        // Fallback to Jupiter for price if DexScreener didn't work
+        if (pricePerToken === 0) {
+          try {
+            const jr = await fetch(
+              `https://price.jup.ag/v6/price?ids=${action.tokenMint}`,
+            );
+            const jd = await jr.json();
+            pricePerToken = jd?.data?.[action.tokenMint]?.price ?? 0;
+          } catch {
+            /* best effort */
+          }
+        }
       }
+
+      // Add market cap to action object
+      (action as any).marketCapUsd = marketCapUsd;
 
       // ── Persist trade to DB ───────────────────────────────────────────────
       if (action.tokenMint) {
@@ -839,13 +860,14 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     tx: ParsedTransactionWithMeta,
     walletAddress: string,
   ): {
-    type: 'BUY' | 'SELL';
+    type: 'BUY' | 'SELL' | 'TRANSFER';
     tokenSymbol: string;
     tokenName: string;
     tokenMint: string;
     tokenAmount: number;
     solAmount: number;
     usdValue: number;
+    toAddress?: string;
   } | null {
     const accountKeys = tx.transaction.message.accountKeys;
     const walletIndex = accountKeys.findIndex(
@@ -891,8 +913,92 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
     const token = changedToken || newToken;
 
-    // If no token changed, this is a plain SOL transfer — skip it
-    if (!token) return null;
+    // If no token changed, check if this is a SOL or token transfer
+    if (!token) {
+      // Check for SOL transfer (outgoing)
+      if (solChange < -0.001) {
+        // Find the recipient by looking at post balances
+        let toAddress = '';
+        for (let i = 0; i < accountKeys.length; i++) {
+          if (i === walletIndex) continue;
+          const balanceChange =
+            ((tx.meta?.postBalances?.[i] ?? 0) -
+              (tx.meta?.preBalances?.[i] ?? 0)) /
+            1e9;
+          // If someone received SOL (positive change close to what we sent)
+          if (balanceChange > 0.001) {
+            toAddress =
+              accountKeys[i].pubkey?.toString() || accountKeys[i].toString();
+            break;
+          }
+        }
+
+        if (toAddress) {
+          return {
+            type: 'TRANSFER',
+            tokenSymbol: 'SOL',
+            tokenName: 'Solana',
+            tokenMint: 'So11111111111111111111111111111111111111112',
+            tokenAmount: 0,
+            solAmount: Math.abs(solChange),
+            usdValue: 0,
+            toAddress,
+          };
+        }
+      }
+
+      // Check for token transfer (token balance decreased but no SOL swap)
+      const tokenTransfer = preTokenBalances.find((pre) => {
+        const post = postTokenBalances.find(
+          (p) => p.mint === pre.mint && p.owner === walletAddress,
+        );
+        return (
+          post &&
+          (pre.uiTokenAmount.uiAmount ?? 0) > (post.uiTokenAmount.uiAmount ?? 0)
+        );
+      });
+
+      if (tokenTransfer) {
+        // Find recipient
+        let toAddress = '';
+        const recipientToken = postTokenBalances.find((post) => {
+          const pre = preTokenBalances.find(
+            (p) => p.mint === post.mint && p.owner === post.owner,
+          );
+          return (
+            post.mint === tokenTransfer.mint &&
+            post.owner !== walletAddress &&
+            (post.uiTokenAmount.uiAmount ?? 0) >
+              (pre?.uiTokenAmount.uiAmount ?? 0)
+          );
+        });
+
+        if (recipientToken) {
+          toAddress = recipientToken.owner;
+        }
+
+        const post = postTokenBalances.find(
+          (p) => p.mint === tokenTransfer.mint && p.owner === walletAddress,
+        );
+        const tokenAmount = Math.abs(
+          (tokenTransfer.uiTokenAmount.uiAmount ?? 0) -
+            (post?.uiTokenAmount.uiAmount ?? 0),
+        );
+
+        return {
+          type: 'TRANSFER',
+          tokenSymbol: `${tokenTransfer.mint.slice(0, 6)}...${tokenTransfer.mint.slice(-4)}`,
+          tokenName: '',
+          tokenMint: tokenTransfer.mint,
+          tokenAmount,
+          solAmount: Math.abs(solChange),
+          usdValue: 0,
+          toAddress,
+        };
+      }
+
+      return null;
+    }
 
     let tokenMint = token.mint;
     let tokenSymbol = `${token.mint.slice(0, 6)}...${token.mint.slice(-4)}`;
@@ -1229,54 +1335,77 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     walletAddress: string,
     signature: string,
     action: {
-      type: 'BUY' | 'SELL';
+      type: 'BUY' | 'SELL' | 'TRANSFER';
       tokenSymbol: string;
       tokenName: string;
       tokenMint: string;
       tokenAmount: number;
       solAmount: number;
       usdValue: number;
+      marketCapUsd?: number;
+      toAddress?: string;
     },
     label?: string,
   ): string {
+    // Handle transfers differently
+    if (action.type === 'TRANSFER') {
+      const labelLine = label ? `#<b>${label}</b>\n` : '';
+      const toShort = action.toAddress 
+        ? `${action.toAddress.slice(0, 6)}...${action.toAddress.slice(-4)}`
+        : 'Unknown';
+      
+      if (action.tokenSymbol === 'SOL') {
+        const usdStr = action.usdValue > 0 ? ` ($${action.usdValue.toFixed(2)})` : '';
+        return (
+          labelLine +
+          `📤 Transferred <b>${action.solAmount.toFixed(4)}</b> #<b>SOL</b>${usdStr} to\n` +
+          `<code>${action.toAddress}</code>\n` +
+          `<a href="https://solscan.io/account/${walletAddress}">Wallet</a> | <a href="https://solscan.io/account/${action.toAddress}">Recipient</a> | <a href="https://solscan.io/tx/${signature}">ViewTx</a>`
+        );
+      } else {
+        const tokenAmtStr = action.tokenAmount > 0 
+          ? action.tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })
+          : '?';
+        const usdStr = action.usdValue > 0 ? ` ($${action.usdValue.toFixed(2)})` : '';
+        return (
+          labelLine +
+          `📤 Transferred <b>${tokenAmtStr}</b> #<b>${action.tokenSymbol}</b>${usdStr} to\n` +
+          `<code>${action.toAddress}</code>\n` +
+          `<a href="https://solscan.io/account/${walletAddress}">Wallet</a> | <a href="https://solscan.io/account/${action.toAddress}">Recipient</a> | <a href="https://solscan.io/tx/${signature}">ViewTx</a>`
+        );
+      }
+    }
+    
+    // Handle swaps (BUY/SELL)
     const isBuy = action.type === 'BUY';
     const emoji = isBuy ? '🟢' : '🔴';
-    const labelLine = label ? `🏷 <b>${label}</b>\n` : '';
-    const short = `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+    const labelLine = label ? `#<b>${label}</b>\n` : '';
+    
+    // Format market cap
+    const formatMC = (mc: number): string => {
+      if (mc >= 1_000_000) return `$${(mc / 1_000_000).toFixed(1)}m`;
+      if (mc >= 1_000) return `$${(mc / 1_000).toFixed(1)}k`;
+      return `$${mc.toFixed(0)}`;
+    };
+    
+    const mcLine = action.marketCapUsd 
+      ? ` | MC: ${formatMC(action.marketCapUsd)}`
+      : '';
 
-    const usdLine =
-      action.usdValue > 0
-        ? `💵 Value: <b>~$${action.usdValue.toFixed(2)}</b>\n`
-        : '';
-
-    const tokenAmountLine =
-      action.tokenAmount > 0
-        ? `🪙 Tokens: <b>${action.tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</b>\n`
-        : '';
-
-    const pricePerToken =
-      action.tokenAmount > 0 && action.usdValue > 0
-        ? `📊 Price paid: <b>$${(action.usdValue / action.tokenAmount).toExponential(4)}</b> per token\n`
-        : '';
-
-    const links = action.tokenMint
-      ? `🔗 <a href="https://dexscreener.com/solana/${action.tokenMint}">Chart</a>  ·  <a href="https://solscan.io/token/${action.tokenMint}">Token</a>  ·  <a href="https://solscan.io/tx/${signature}">TX</a>`
-      : `🔗 <a href="https://solscan.io/tx/${signature}">View Transaction</a>`;
+    // Compact format: "Swapped X TOKEN ($Y) for Z SOL"
+    const tokenAmtStr = action.tokenAmount > 0 
+      ? action.tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })
+      : '?';
+    
+    const usdStr = action.usdValue > 0 ? `($${action.usdValue.toFixed(2)})` : '';
 
     return (
-      `${emoji} <b>${isBuy ? '🟢 BUY' : '🔴 SELL'}</b>\n` +
-      `━━━━━━━━━━━━━━━━━━━━\n` +
       labelLine +
-      `👛 <a href="https://solscan.io/account/${walletAddress}">${short}</a>\n` +
-      `🏷 Token: <b>${action.tokenSymbol}</b>\n` +
-      tokenAmountLine +
-      `◎ SOL: <b>${action.solAmount.toFixed(4)} SOL</b>\n` +
-      usdLine +
-      pricePerToken +
-      `━━━━━━━━━━━━━━━━━━━━\n` +
-      links
+      `${emoji} ${isBuy ? 'Swapped' : 'Sold'} <b>${tokenAmtStr}</b> #<b>${action.tokenSymbol}</b> ${usdStr} for <b>${action.solAmount.toFixed(4)}</b> #<b>SOL</b>${mcLine}\n` +
+      `<a href="https://solscan.io/account/${walletAddress}">Wallet</a> | <a href="https://dexscreener.com/solana/${action.tokenMint}">Chart</a> | <a href="https://solscan.io/tx/${signature}">ViewTx</a>`
     );
   }
+
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
 
