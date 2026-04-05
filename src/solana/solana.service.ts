@@ -850,7 +850,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
             `https://api.dexscreener.com/latest/dex/tokens/${primaryMint}`,
           );
           const dd = await dr.json();
-          marketCap = dd?.pairs?.[0]?.fdv ?? 0;
+          const pair = (dd?.pairs ?? []).find((p: any) => p?.fdv > 0);
+          marketCap = pair?.fdv ?? 0;
         } catch {
           /* best effort */
         }
@@ -1289,13 +1290,14 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       : '';
 
     const mc = extra?.marketCap ?? 0;
-    const mcFmt = mc > 0
-      ? mc >= 1_000_000_000
-        ? `MC $${(mc / 1_000_000_000).toFixed(2)}B`
-        : mc >= 1_000_000
-          ? `MC $${(mc / 1_000_000).toFixed(2)}M`
-          : `MC $${(mc / 1_000).toFixed(2)}K`
-      : '';
+    const mcFmt =
+      mc > 0
+        ? mc >= 1_000_000_000
+          ? `MC $${(mc / 1_000_000_000).toFixed(2)}B`
+          : mc >= 1_000_000
+            ? `MC $${(mc / 1_000_000).toFixed(2)}M`
+            : `MC $${(mc / 1_000).toFixed(2)}K`
+        : '';
 
     return (
       labelLine +
