@@ -184,14 +184,15 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
   async getWatchedWallets(
     chatId: number,
-  ): Promise<{ address: string; label: string }[]> {
+  ): Promise<{ address: string; label: string; paused: boolean }[]> {
     const list = await this.prisma.watchedWallet.findMany({
       where: { userId: chatId },
-      select: { walletAddress: true, label: true },
+      select: { walletAddress: true, label: true, paused: true },
     });
     return list.map((item) => ({
       address: item.walletAddress,
       label: item.label ?? '',
+      paused: item.paused,
     }));
   }
 

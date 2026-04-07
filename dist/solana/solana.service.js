@@ -147,11 +147,12 @@ let SolanaService = SolanaService_1 = class SolanaService {
     async getWatchedWallets(chatId) {
         const list = await this.prisma.watchedWallet.findMany({
             where: { userId: chatId },
-            select: { walletAddress: true, label: true },
+            select: { walletAddress: true, label: true, paused: true },
         });
         return list.map((item) => ({
             address: item.walletAddress,
             label: item.label ?? '',
+            paused: item.paused,
         }));
     }
     async setWalletLabel(chatId, address, label) {

@@ -20,6 +20,7 @@ export declare class SolanaService implements OnModuleInit, OnModuleDestroy {
     getWatchedWallets(chatId: number): Promise<{
         address: string;
         label: string;
+        paused: boolean;
     }[]>;
     setWalletLabel(chatId: number, address: string, label: string): Promise<boolean>;
     getWalletLabel(chatId: number, address: string): Promise<string>;

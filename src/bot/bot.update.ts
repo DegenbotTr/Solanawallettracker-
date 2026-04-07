@@ -46,6 +46,22 @@ const pendingLabelAddress = new Map<number, string>();
 const pendingTagAddress = new Map<number, string>();
 const pendingWalletMinsizeAddress = new Map<number, string>();
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function isGroup(ctx: Context): boolean {
+  const type = ctx.chat?.type;
+  return type === 'group' || type === 'supergroup';
+}
+
+async function isGroupAdmin(ctx: Context): Promise<boolean> {
+  try {
+    const member = await ctx.telegram.getChatMember(ctx.chat.id, ctx.from.id);
+    return ['creator', 'administrator'].includes(member.status);
+  } catch {
+    return false;
+  }
+}
+
 // ─── Keyboards ────────────────────────────────────────────────────────────────
 
 const MAIN_MENU_TEXT =
@@ -171,9 +187,20 @@ export class BotUpdate {
     await this.trackUser(ctx);
     const username = (ctx.from as any)?.first_name || 'Trader';
 
-    // Welcome message with bot description
+    if (isGroup(ctx)) {
+      await ctx.reply(
+        `👁 <b>Sol Wallet Watcher</b> is now active in this group!\n\n` +
+          `Use <code>/watch &lt;address&gt;</code> to track a Solana wallet.\n` +
+          `Use <code>/unwatch &lt;address&gt;</code> to stop tracking.\n` +
+          `Use <code>/list</code> to see all watched wallets.\n\n` +
+          `⚠️ Solana wallets only.`,
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+
     await ctx.reply(
-      `� <b>Welcome, ${username}!</b>\n\n` +
+      `👋 <b>Welcome, ${username}!</b>\n\n` +
         `🔭 <b>Sol Wallet Watcher</b> is a real-time Solana wallet tracker.\n\n` +
         `⚡ <b>What it does:</b>\n` +
         `• Watches any Solana wallet 24/7\n` +
@@ -186,7 +213,6 @@ export class BotUpdate {
       { parse_mode: 'HTML', reply_markup: persistentKeyboard },
     );
 
-    // Show inline menu
     await ctx.reply(`🏠 <b>Main Menu</b>`, {
       parse_mode: 'HTML',
       reply_markup: mainMenuKeyboard(),
@@ -217,9 +243,19 @@ export class BotUpdate {
   @Command('watch')
   async onWatch(@Ctx() ctx: Context): Promise<void> {
     await this.trackUser(ctx);
+    if (isGroup(ctx) && !(await isGroupAdmin(ctx))) {
+      await ctx.reply(`🚫 Only group admins can add wallets to watch.`);
+      return;
+    }
     const address = this.extractArg(ctx);
     if (address) {
       await this.addWallet(ctx, address);
+      return;
+    }
+    if (isGroup(ctx)) {
+      await ctx.reply(`👛 Usage: <code>/watch &lt;solana_address&gt;</code>`, {
+        parse_mode: 'HTML',
+      });
       return;
     }
     pendingAction.set(ctx.chat.id, 'watch');
@@ -231,9 +267,19 @@ export class BotUpdate {
 
   @Command('unwatch')
   async onUnwatch(@Ctx() ctx: Context): Promise<void> {
+    if (isGroup(ctx) && !(await isGroupAdmin(ctx))) {
+      await ctx.reply(`🚫 Only group admins can remove wallets.`);
+      return;
+    }
     const address = this.extractArg(ctx);
     if (address) {
       await this.removeWallet(ctx, address);
+      return;
+    }
+    if (isGroup(ctx)) {
+      await ctx.reply(`� Usage: <code>/unwatch &lt;solana_address&gt;</code>`, {
+        parse_mode: 'HTML',
+      });
       return;
     }
     const wallets = await this.solanaService.getWatchedWallets(ctx.chat.id);
@@ -256,6 +302,29 @@ export class BotUpdate {
 
   @Command('list')
   async onList(@Ctx() ctx: Context): Promise<void> {
+    if (isGroup(ctx)) {
+      const wallets = await this.solanaService.getWatchedWallets(ctx.chat.id);
+      if (wallets.length === 0) {
+        await ctx.reply(
+          `📭 No wallets being watched in this group. Use /watch &lt;address&gt; to add one.`,
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+      const list = wallets
+        .map((w) => {
+          const short = `${w.address.slice(0, 6)}...${w.address.slice(-4)}`;
+          const name = w.label ? ` — <b>${w.label}</b>` : '';
+          const paused = w.paused ? ' ⏸' : '';
+          return `• ${short}${name}${paused}\n  <code>${w.address}</code>`;
+        })
+        .join('\n\n');
+      await ctx.reply(
+        `👁 <b>Watched Wallets (${wallets.length})</b>\n━━━━━━━━━━━━━━━━━━━━\n${list}`,
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
     const { text, keyboard } = await this.buildWalletListContent(ctx.chat.id);
     await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
   }
@@ -788,13 +857,23 @@ export class BotUpdate {
         return;
       }
       const short = `${address.slice(0, 6)}...${address.slice(-4)}`;
-      await ctx.reply(
-        `✅ <b>Wallet Added</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
-          `👛 <a href="https://solscan.io/account/${address}">${short}</a>\n` +
-          `<code>${address}</code>\n\n` +
-          `You'll be notified on every buy and sell.\n💡 Use /label to give this wallet a name.`,
-        { parse_mode: 'HTML', reply_markup: walletKeyboard(address) },
-      );
+      if (isGroup(ctx)) {
+        await ctx.reply(
+          `✅ <b>Wallet Added</b>\n` +
+            `👛 <code>${address}</code>\n\n` +
+            `This group will now receive alerts for every trade.\n` +
+            `Use <code>/unwatch ${address}</code> to stop.`,
+          { parse_mode: 'HTML' },
+        );
+      } else {
+        await ctx.reply(
+          `✅ <b>Wallet Added</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `👛 <a href="https://solscan.io/account/${address}">${short}</a>\n` +
+            `<code>${address}</code>\n\n` +
+            `You'll be notified on every buy and sell.\n💡 Use /label to give this wallet a name.`,
+          { parse_mode: 'HTML', reply_markup: walletKeyboard(address) },
+        );
+      }
     } catch {
       await ctx.reply(`❌ Something went wrong. Please try again.`);
     }
