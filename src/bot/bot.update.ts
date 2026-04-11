@@ -1031,29 +1031,44 @@ export class BotUpdate {
   }
 
   private async showTokenInfo(ctx: Context, mint: string): Promise<void> {
+    const replyToId = (ctx.message as any)?.message_id;
     const loading = await ctx.reply('🔍 Fetching token info...');
     try {
       const { text, imageUrl } = await this.solanaService.getTokenInfo(mint);
       const keyboard = {
-        inline_keyboard: [[
-          { text: 'Chart', url: `https://dexscreener.com/solana/${mint}` },
-          { text: 'Birdeye', url: `https://birdeye.so/token/${mint}?chain=solana` },
-          { text: 'Solscan', url: `https://solscan.io/token/${mint}` },
-        ]],
+        inline_keyboard: [
+          [
+            { text: 'Chart', url: `https://dexscreener.com/solana/${mint}` },
+            {
+              text: 'Birdeye',
+              url: `https://birdeye.so/token/${mint}?chain=solana`,
+            },
+            { text: 'Solscan', url: `https://solscan.io/token/${mint}` },
+          ],
+        ],
       };
-      await ctx.telegram.deleteMessage(ctx.chat.id, (loading as any).message_id).catch(() => {});
+      await ctx.telegram
+        .deleteMessage(ctx.chat.id, (loading as any).message_id)
+        .catch(() => {});
       if (imageUrl) {
         await ctx.replyWithPhoto(imageUrl, {
           caption: text,
           parse_mode: 'HTML',
           reply_markup: keyboard,
-        });
+          reply_parameters: { message_id: replyToId },
+        } as any);
       } else {
-        await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
+        await ctx.reply(text, {
+          parse_mode: 'HTML',
+          reply_markup: keyboard,
+          reply_parameters: { message_id: replyToId },
+        } as any);
       }
     } catch {
       await ctx.telegram.editMessageText(
-        ctx.chat.id, (loading as any).message_id, undefined,
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
         `❌ Could not fetch token info. Make sure it's a valid Solana token address.`,
         { parse_mode: 'HTML' },
       );

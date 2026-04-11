@@ -703,26 +703,39 @@ let BotUpdate = class BotUpdate {
             : `✅ <b>Min alert size: $${value}</b>\n\nOnly trades above this value will notify you.`, { parse_mode: 'HTML', reply_markup: mainMenuKeyboard() });
     }
     async showTokenInfo(ctx, mint) {
+        const replyToId = ctx.message?.message_id;
         const loading = await ctx.reply('🔍 Fetching token info...');
         try {
             const { text, imageUrl } = await this.solanaService.getTokenInfo(mint);
             const keyboard = {
-                inline_keyboard: [[
+                inline_keyboard: [
+                    [
                         { text: 'Chart', url: `https://dexscreener.com/solana/${mint}` },
-                        { text: 'Birdeye', url: `https://birdeye.so/token/${mint}?chain=solana` },
+                        {
+                            text: 'Birdeye',
+                            url: `https://birdeye.so/token/${mint}?chain=solana`,
+                        },
                         { text: 'Solscan', url: `https://solscan.io/token/${mint}` },
-                    ]],
+                    ],
+                ],
             };
-            await ctx.telegram.deleteMessage(ctx.chat.id, loading.message_id).catch(() => { });
+            await ctx.telegram
+                .deleteMessage(ctx.chat.id, loading.message_id)
+                .catch(() => { });
             if (imageUrl) {
                 await ctx.replyWithPhoto(imageUrl, {
                     caption: text,
                     parse_mode: 'HTML',
                     reply_markup: keyboard,
+                    reply_parameters: { message_id: replyToId },
                 });
             }
             else {
-                await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
+                await ctx.reply(text, {
+                    parse_mode: 'HTML',
+                    reply_markup: keyboard,
+                    reply_parameters: { message_id: replyToId },
+                });
             }
         }
         catch {
