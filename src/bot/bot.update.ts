@@ -1079,7 +1079,7 @@ export class BotUpdate {
     const replyToId = (ctx.message as any)?.message_id;
     const loading = await ctx.reply('🔍 Fetching token info...');
     try {
-      const { text, imageUrl } = await this.solanaService.getTokenInfo(mint);
+      const { text, imageUrl, symbol, name } = await this.solanaService.getTokenInfo(mint);
       const keyboard = {
         inline_keyboard: [
           [
@@ -1098,13 +1098,7 @@ export class BotUpdate {
 
       // Record call in groups for trending
       if (isGroup(ctx)) {
-        const nameMatch = text.match(/\U0001FA99 <b>(.+?)<\/b>/);
-        const symbolMatch = text.match(/\(\$(.+?)\)/);
-        const name = nameMatch?.[1] ?? '';
-        const symbol = symbolMatch?.[1] ?? '';
-        this.solanaService
-          .recordGroupTokenCall(ctx.chat.id, mint, symbol, name)
-          .catch(() => {});
+        this.solanaService.recordGroupTokenCall(ctx.chat.id, mint, symbol, name).catch(() => {});
       }
 
       if (imageUrl) {

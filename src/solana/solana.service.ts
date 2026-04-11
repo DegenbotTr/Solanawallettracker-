@@ -765,7 +765,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       orderBy: { calledAt: 'desc' },
     });
 
-    // Group by mint, count calls, keep latest symbol/name
+    // Group by mint — prefer entry with a real symbol, count all
     const map = new Map<
       string,
       { symbol: string; name: string; count: number }
@@ -774,23 +774,59 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       const existing = map.get(c.mint);
       if (existing) {
         existing.count++;
+        // upgrade symbol/name if we now have a better one
+        if (!existing.symbol && c.symbol) existing.symbol = c.symbol;
+        if (!existing.name && c.name) existing.name = c.name;
       } else {
         map.set(c.mint, { symbol: c.symbol, name: c.name, count: 1 });
       }
     }
 
-    return Array.from(map.entries())
+    const results = Array.from(map.entries())
       .map(([mint, v]) => ({ mint, ...v }))
       .sort((a, b) => b.count - a.count);
+
+    // For any token still missing a symbol, fetch it live from DexScreener
+    await Promise.all(
+      results
+        .filter((t) => !t.symbol)
+        .map(async (t) => {
+          try {
+            const r = await fetch(
+              `https://api.dexscreener.com/latest/dex/tokens/${t.mint}`,
+            );
+            const d = await r.json();
+            const pair = (d?.pairs ?? []).find(
+              (p: any) => p?.baseToken?.symbol,
+            );
+            if (pair) {
+              t.symbol = pair.baseToken.symbol ?? '';
+              t.name = pair.baseToken.name ?? '';
+              // backfill DB so next time it's already there
+              await this.prisma.groupTokenCall.updateMany({
+                where: { groupId, mint: t.mint, symbol: '' },
+                data: { symbol: t.symbol, name: t.name },
+              });
+            }
+          } catch {
+            /* best effort */
+          }
+        }),
+    );
+
+    return results;
   }
 
   // ─── Token Info Card ─────────────────────────────────────────────────────────
 
-  async getTokenInfo(
-    mint: string,
-  ): Promise<{ text: string; imageUrl: string | null }> {
-    // Fetch from DexScreener and Helius in parallel
-    const [dsRes, heliusRes] = await Promise.allSettled([
+  async getTokenInfo(mint: string): Promise<{
+    text: string;
+    imageUrl: string | null;
+    symbol: string;
+    name: string;
+  }> {
+    // Fetch from DexScreener, Helius, and RugCheck in parallel
+    const [dsRes, heliusRes, rugRes] = await Promise.allSettled([
       fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`).then((r) =>
         r.json(),
       ),
@@ -804,10 +840,14 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
           params: { id: mint },
         }),
       }).then((r) => r.json()),
+      fetch(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`).then((r) =>
+        r.json(),
+      ),
     ]);
 
     const ds = dsRes.status === 'fulfilled' ? dsRes.value : null;
     const helius = heliusRes.status === 'fulfilled' ? heliusRes.value : null;
+    const rug = rugRes.status === 'fulfilled' ? rugRes.value : null;
 
     // Pick the most liquid pair from DexScreener
     const pairs: any[] = ds?.pairs ?? [];
@@ -819,6 +859,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       return {
         text: `❌ No trading data found for this token.`,
         imageUrl: null,
+        symbol: '',
+        name: '',
       };
     }
 
@@ -878,7 +920,56 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
             : supply.toLocaleString(undefined, { maximumFractionDigits: 0 })
         : 'N/A';
 
-    const mintShort = `${mint.slice(0, 6)}...${mint.slice(-4)}`;
+    // Security from RugCheck
+    const topHolders: any[] = rug?.topHolders ?? [];
+    const top10Pct = topHolders
+      .slice(0, 10)
+      .reduce((s: number, h: any) => s + (h.pct ?? 0), 0);
+    const top10Count = topHolders.slice(0, 10).length;
+    const totalHolders: number = rug?.totalHolders ?? 0;
+    const mintAuthority = rug?.mintAuthority ?? rug?.token?.mintAuthority;
+    const freezeAuthority = rug?.freezeAuthority ?? rug?.token?.freezeAuthority;
+    const creatorBalance: number = rug?.creatorBalance ?? 0;
+    const devSold = creatorBalance === 0;
+    const risks: any[] = rug?.risks ?? [];
+    const dexPaid = !risks.some(
+      (r: any) =>
+        r.name?.toLowerCase().includes('dex') &&
+        r.name?.toLowerCase().includes('not paid'),
+    );
+    const rugScore: number = rug?.score_normalised ?? rug?.score ?? 0;
+    const rugLink = `https://rugcheck.xyz/tokens/${mint}`;
+
+    const securityLine = rug
+      ? `\n🔒 <b>Security</b>\n` +
+        `├ Mint Auth  ${mintAuthority ? '🔴 Enabled' : '🟢 Disabled'}\n` +
+        `├ Freeze     ${freezeAuthority ? '🔴 Enabled' : '🟢 Disabled'}\n` +
+        `├ Top 10     <b>${top10Pct.toFixed(1)}%</b> of supply (${top10Count} holders)\n` +
+        `├ Holders    <b>${totalHolders.toLocaleString()}</b>\n` +
+        `├ Dev Sold   ${devSold ? '🟢 Yes' : '🔴 No'}\n` +
+        `├ DEX Paid   ${dexPaid ? '🟢 Yes' : '🔴 No'}\n` +
+        `└ <a href="${rugLink}">Full report on RugCheck</a>`
+      : '';
+    const socials: any[] = pair.info?.socials ?? [];
+    const websites: any[] = pair.info?.websites ?? [];
+    const twitter = socials.find((s: any) => s.type === 'twitter')?.url ?? null;
+    const telegram =
+      socials.find((s: any) => s.type === 'telegram')?.url ?? null;
+    const website = websites[0]?.url ?? null;
+
+    // Twitter search link
+    const twitterQuery = encodeURIComponent(
+      `($${symbol} OR ${mint} OR url:${mint})`,
+    );
+    const twitterSearchUrl = `https://twitter.com/search?q=${twitterQuery}&f=live`;
+
+    const socialParts: string[] = [];
+    if (twitter) socialParts.push(`<a href="${twitter}">X</a>`);
+    if (telegram) socialParts.push(`<a href="${telegram}">TG</a>`);
+    if (website) socialParts.push(`<a href="${website}">About</a>`);
+    socialParts.push(`<a href="${twitterSearchUrl}">Search X</a>`);
+
+    const socialsLine = `\n🔗 <b>Socials</b>\n└ ${socialParts.join(' • ')}`;
 
     const text =
       `🪙 <b>${name}</b> (<b>$${symbol}</b>)\n` +
@@ -893,9 +984,11 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       `├ 1H     ${changeStr(priceChange1h)}\n` +
       `└ 24H    ${changeStr(priceChange24h)}\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
-      `🏦 DEX: <b>${dex.toUpperCase()}</b>`;
+      `🏦 DEX: <b>${dex.toUpperCase()}</b>` +
+      socialsLine +
+      securityLine;
 
-    return { text, imageUrl };
+    return { text, imageUrl, symbol, name };
   }
 
   // ─── Price Check ─────────────────────────────────────────────────────────────

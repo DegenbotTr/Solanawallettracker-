@@ -55,6 +55,8 @@ export declare class SolanaService implements OnModuleInit, OnModuleDestroy {
     getTokenInfo(mint: string): Promise<{
         text: string;
         imageUrl: string | null;
+        symbol: string;
+        name: string;
     }>;
     getTokenPrice(mintOrSymbol: string): Promise<string>;
     private handleTransaction;
