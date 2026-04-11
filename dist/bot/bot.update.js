@@ -264,37 +264,22 @@ let BotUpdate = class BotUpdate {
         const groupName = ctx.chat?.title ?? 'this group';
         const botUsername = process.env.BOT_USERNAME ?? '';
         if (tokens.length === 0) {
-            await ctx.reply(`⚡ <b>Trending Tokens (1D)</b>\n└ ${groupName}\n\nNo tokens called in the past 24 hours.`, {
-                parse_mode: 'HTML',
-                reply_parameters: { message_id: replyToId },
-            });
+            await ctx.reply(`⚡ <b>Trending Tokens (1D)</b>\n└ ${groupName}\n\nNo tokens called in the past 24 hours.`, { parse_mode: 'HTML', reply_parameters: { message_id: replyToId } });
             return;
         }
         const total = tokens.reduce((s, t) => s + t.count, 0);
         const list = tokens
             .map((t, i) => {
-            const label = t.symbol
-                ? `$${t.symbol}`
-                : `${t.mint.slice(0, 6)}...${t.mint.slice(-4)}`;
-            const times = t.count > 1 ? ` x${t.count}` : '';
-            return `${i + 1}: ${label}${times}`;
+            const label = t.symbol ? `$${t.symbol}` : `${t.mint.slice(0, 6)}...${t.mint.slice(-4)}`;
+            const times = t.count > 1 ? ` \"` : '';
+            const url = `https://t.me/${botUsername}?start=token_${t.mint}`;
+            return `${i + 1}: <a href="${url}">${label}</a>${times}`;
         })
             .join('\n');
-        const buttons = tokens.map((t) => {
-            const label = t.symbol
-                ? `$${t.symbol}`
-                : `${t.mint.slice(0, 6)}...${t.mint.slice(-4)}`;
-            return [
-                {
-                    text: `🔍 ${label}`,
-                    url: `https://t.me/${botUsername}?start=token_${t.mint}`,
-                },
-            ];
-        });
-        await ctx.reply(`⚡ <b>Trending Tokens (1D)</b>\n└ ${groupName}\n\n<code>${list}</code>\n\nℹ️ In the past <b>1D</b> <b>${total}</b> token${total !== 1 ? 's have' : ' has'} been queried.`, {
+        await ctx.reply(`⚡ <b>Trending Tokens (1D)</b>\n└ ${groupName}\n\n${list}\n\nℹ️ In the past <b>1D</b> <b>${total}</b> token${total !== 1 ? 's have' : ' has'} been queried.`, {
             parse_mode: 'HTML',
-            reply_markup: { inline_keyboard: buttons },
             reply_parameters: { message_id: replyToId },
+            disable_web_page_preview: true,
         });
     }
     async onLabel(ctx) {
