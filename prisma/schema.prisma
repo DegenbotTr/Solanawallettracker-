@@ -44,6 +44,18 @@ model WatchedWallet {
   @@id([userId, walletAddress]) // Composite primary key
 }
 
+model GroupTokenCall {
+  id        String   @id @default(cuid())
+  groupId   BigInt
+  mint      String
+  symbol    String   @default("")
+  name      String   @default("")
+  calledAt  DateTime @default(now())
+
+  @@index([groupId, calledAt])
+  @@index([groupId, mint])
+}
+
 model Trade {
   id             String           @id @default(cuid())
   walletAddress  String

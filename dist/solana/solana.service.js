@@ -550,6 +550,31 @@ let SolanaService = SolanaService_1 = class SolanaService {
         }
         return lines.join('\n');
     }
+    async recordGroupTokenCall(groupId, mint, symbol, name) {
+        await this.prisma.groupTokenCall.create({
+            data: { groupId, mint, symbol, name },
+        });
+    }
+    async getTrendingTokens(groupId) {
+        const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const calls = await this.prisma.groupTokenCall.findMany({
+            where: { groupId, calledAt: { gte: since } },
+            orderBy: { calledAt: 'desc' },
+        });
+        const map = new Map();
+        for (const c of calls) {
+            const existing = map.get(c.mint);
+            if (existing) {
+                existing.count++;
+            }
+            else {
+                map.set(c.mint, { symbol: c.symbol, name: c.name, count: 1 });
+            }
+        }
+        return Array.from(map.entries())
+            .map(([mint, v]) => ({ mint, ...v }))
+            .sort((a, b) => b.count - a.count);
+    }
     async getTokenInfo(mint) {
         const [dsRes, heliusRes] = await Promise.allSettled([
             fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`).then((r) => r.json()),

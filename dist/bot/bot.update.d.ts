@@ -12,6 +12,7 @@ export declare class BotUpdate {
     onWatch(ctx: Context): Promise<void>;
     onUnwatch(ctx: Context): Promise<void>;
     onList(ctx: Context): Promise<void>;
+    onTrending(ctx: Context): Promise<void>;
     onLabel(ctx: Context): Promise<void>;
     onPortfolio(ctx: Context): Promise<void>;
     onPnl(ctx: Context): Promise<void>;

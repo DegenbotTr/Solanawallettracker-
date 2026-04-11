@@ -329,6 +329,47 @@ export class BotUpdate {
     await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
   }
 
+  @Command('trending')
+  async onTrending(@Ctx() ctx: Context): Promise<void> {
+    const replyToId = (ctx.message as any)?.message_id;
+    const tokens = await this.solanaService.getTrendingTokens(ctx.chat.id);
+
+    const medals = ['🥇', '🥈', '🥉'];
+    const groupName = (ctx.chat as any)?.title ?? 'this group';
+
+    if (tokens.length === 0) {
+      await ctx.reply(
+        `🔥 <b>Trending Tokens [1D]</b>\n└ ${groupName}\n\nNo tokens called in the past 24 hours.`,
+        {
+          parse_mode: 'HTML',
+          reply_parameters: { message_id: replyToId },
+        } as any,
+      );
+      return;
+    }
+
+    const list = tokens
+      .map((t, i) => {
+        const rank = medals[i] ?? `${i + 1}.`;
+        const label = t.symbol
+          ? `$${t.symbol}`
+          : `${t.mint.slice(0, 6)}...${t.mint.slice(-4)}`;
+        const times = t.count > 1 ? ` <i>(×${t.count})</i>` : '';
+        return `${rank} <b>${label}</b>${times}`;
+      })
+      .join('\n');
+
+    const total = tokens.reduce((s, t) => s + t.count, 0);
+
+    await ctx.reply(
+      `🔥 <b>Trending Tokens [1D]</b>\n└ ${groupName}\n\n${list}\n\nℹ️ In the past <b>1D</b> <b>${total}</b> token${total !== 1 ? 's were' : ' was'} called.`,
+      {
+        parse_mode: 'HTML',
+        reply_parameters: { message_id: replyToId },
+      } as any,
+    );
+  }
+
   @Command('label')
   async onLabel(@Ctx() ctx: Context): Promise<void> {
     const wallets = await this.solanaService.getWatchedWallets(ctx.chat.id);
@@ -1050,6 +1091,18 @@ export class BotUpdate {
       await ctx.telegram
         .deleteMessage(ctx.chat.id, (loading as any).message_id)
         .catch(() => {});
+
+      // Record call in groups for trending
+      if (isGroup(ctx)) {
+        const nameMatch = text.match(/\U0001FA99 <b>(.+?)<\/b>/);
+        const symbolMatch = text.match(/\(\$(.+?)\)/);
+        const name = nameMatch?.[1] ?? '';
+        const symbol = symbolMatch?.[1] ?? '';
+        this.solanaService
+          .recordGroupTokenCall(ctx.chat.id, mint, symbol, name)
+          .catch(() => {});
+      }
+
       if (imageUrl) {
         await ctx.replyWithPhoto(imageUrl, {
           caption: text,

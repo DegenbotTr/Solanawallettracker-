@@ -743,6 +743,47 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     return lines.join('\n');
   }
 
+  // ─── Group Token Calls ───────────────────────────────────────────────────────
+
+  async recordGroupTokenCall(
+    groupId: number,
+    mint: string,
+    symbol: string,
+    name: string,
+  ): Promise<void> {
+    await this.prisma.groupTokenCall.create({
+      data: { groupId, mint, symbol, name },
+    });
+  }
+
+  async getTrendingTokens(
+    groupId: number,
+  ): Promise<{ mint: string; symbol: string; name: string; count: number }[]> {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const calls = await this.prisma.groupTokenCall.findMany({
+      where: { groupId, calledAt: { gte: since } },
+      orderBy: { calledAt: 'desc' },
+    });
+
+    // Group by mint, count calls, keep latest symbol/name
+    const map = new Map<
+      string,
+      { symbol: string; name: string; count: number }
+    >();
+    for (const c of calls) {
+      const existing = map.get(c.mint);
+      if (existing) {
+        existing.count++;
+      } else {
+        map.set(c.mint, { symbol: c.symbol, name: c.name, count: 1 });
+      }
+    }
+
+    return Array.from(map.entries())
+      .map(([mint, v]) => ({ mint, ...v }))
+      .sort((a, b) => b.count - a.count);
+  }
+
   // ─── Token Info Card ─────────────────────────────────────────────────────────
 
   async getTokenInfo(
