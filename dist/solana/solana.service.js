@@ -621,7 +621,7 @@ let SolanaService = SolanaService_1 = class SolanaService {
         const pair = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
         if (!pair) {
             return {
-                text: `❌ No trading data found for this token.`,
+                text: `❌ No trading data found for this token.\n\nThis address may not be a tradeable token, or it has no active liquidity pool on any DEX yet.`,
                 imageUrl: null,
                 symbol: '',
                 name: '',

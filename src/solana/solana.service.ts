@@ -857,7 +857,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
     if (!pair) {
       return {
-        text: `❌ No trading data found for this token.`,
+        text: `❌ No trading data found for this token.\n\nThis address may not be a tradeable token, or it has no active liquidity pool on any DEX yet.`,
         imageUrl: null,
         symbol: '',
         name: '',

@@ -264,13 +264,18 @@ let BotUpdate = class BotUpdate {
         const groupName = ctx.chat?.title ?? 'this group';
         const botUsername = process.env.BOT_USERNAME ?? '';
         if (tokens.length === 0) {
-            await ctx.reply(`⚡ <b>Trending Tokens (1D)</b>\n└ ${groupName}\n\nNo tokens called in the past 24 hours.`, { parse_mode: 'HTML', reply_parameters: { message_id: replyToId } });
+            await ctx.reply(`⚡ <b>Trending Tokens (1D)</b>\n└ ${groupName}\n\nNo tokens called in the past 24 hours.`, {
+                parse_mode: 'HTML',
+                reply_parameters: { message_id: replyToId },
+            });
             return;
         }
         const total = tokens.reduce((s, t) => s + t.count, 0);
         const list = tokens
             .map((t, i) => {
-            const label = t.symbol ? `$${t.symbol}` : `${t.mint.slice(0, 6)}...${t.mint.slice(-4)}`;
+            const label = t.symbol
+                ? `$${t.symbol}`
+                : `${t.mint.slice(0, 6)}...${t.mint.slice(-4)}`;
             const times = t.count > 1 ? ` \"` : '';
             const url = `https://t.me/${botUsername}?start=token_${t.mint}`;
             return `${i + 1}: <a href="${url}">${label}</a>${times}`;
@@ -543,6 +548,9 @@ let BotUpdate = class BotUpdate {
         if (!action) {
             const trimmed = text.trim();
             if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
+                const watched = await this.solanaService.getWatchedWallets(chatId);
+                if (watched.some((w) => w.address === trimmed))
+                    return;
                 await this.showTokenInfo(ctx, trimmed);
                 return;
             }
@@ -753,7 +761,9 @@ let BotUpdate = class BotUpdate {
                 .deleteMessage(ctx.chat.id, loading.message_id)
                 .catch(() => { });
             if (isGroup(ctx)) {
-                this.solanaService.recordGroupTokenCall(ctx.chat.id, mint, symbol, name).catch(() => { });
+                this.solanaService
+                    .recordGroupTokenCall(ctx.chat.id, mint, symbol, name)
+                    .catch(() => { });
             }
             if (imageUrl) {
                 await ctx.replyWithPhoto(imageUrl, {

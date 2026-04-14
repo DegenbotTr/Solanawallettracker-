@@ -347,7 +347,10 @@ export class BotUpdate {
     if (tokens.length === 0) {
       await ctx.reply(
         `⚡ <b>Trending Tokens (1D)</b>\n└ ${groupName}\n\nNo tokens called in the past 24 hours.`,
-        { parse_mode: 'HTML', reply_parameters: { message_id: replyToId } } as any,
+        {
+          parse_mode: 'HTML',
+          reply_parameters: { message_id: replyToId },
+        } as any,
       );
       return;
     }
@@ -356,7 +359,9 @@ export class BotUpdate {
 
     const list = tokens
       .map((t, i) => {
-        const label = t.symbol ? `$${t.symbol}` : `${t.mint.slice(0, 6)}...${t.mint.slice(-4)}`;
+        const label = t.symbol
+          ? `$${t.symbol}`
+          : `${t.mint.slice(0, 6)}...${t.mint.slice(-4)}`;
         const times = t.count > 1 ? ` \"` : '';
         const url = `https://t.me/${botUsername}?start=token_${t.mint}`;
         return `${i + 1}: <a href="${url}">${label}</a>${times}`;
@@ -797,9 +802,12 @@ export class BotUpdate {
 
     const action = pendingAction.get(chatId);
     if (!action) {
-      // Auto-detect pasted Solana token address (base58, 32-44 chars, no spaces)
+      // Auto-detect pasted Solana address (base58, 32-44 chars, no spaces)
       const trimmed = text.trim();
       if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
+        // Skip if it's a watched wallet address — not a token
+        const watched = await this.solanaService.getWatchedWallets(chatId);
+        if (watched.some((w) => w.address === trimmed)) return;
         await this.showTokenInfo(ctx, trimmed);
         return;
       }
@@ -1079,7 +1087,8 @@ export class BotUpdate {
     const replyToId = (ctx.message as any)?.message_id;
     const loading = await ctx.reply('🔍 Fetching token info...');
     try {
-      const { text, imageUrl, symbol, name } = await this.solanaService.getTokenInfo(mint);
+      const { text, imageUrl, symbol, name } =
+        await this.solanaService.getTokenInfo(mint);
       const keyboard = {
         inline_keyboard: [
           [
@@ -1098,7 +1107,9 @@ export class BotUpdate {
 
       // Record call in groups for trending
       if (isGroup(ctx)) {
-        this.solanaService.recordGroupTokenCall(ctx.chat.id, mint, symbol, name).catch(() => {});
+        this.solanaService
+          .recordGroupTokenCall(ctx.chat.id, mint, symbol, name)
+          .catch(() => {});
       }
 
       if (imageUrl) {
