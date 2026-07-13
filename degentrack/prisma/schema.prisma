@@ -61,6 +61,14 @@ model GroupTokenCall {
   @@index([groupId, callerId])
 }
 
+model TokenPeak {
+  mint          String   @id
+  peakMcUsd     Float    @default(0)
+  peakAt        DateTime @default(now())
+  lastCheckedAt DateTime @default(now())
+  lastMcUsd     Float    @default(0)
+}
+
 model Trade {
   id             String           @id @default(cuid())
   walletAddress  String

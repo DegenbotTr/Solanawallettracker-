@@ -34,6 +34,18 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
   } | null = null;
   private static readonly SOL_PRICE_TTL_MS = 30_000;
 
+  // Peak-MC poller — updates TokenPeak for recently-called mints every 5 min.
+  private peakPollTimer: NodeJS.Timeout | null = null;
+  private static readonly PEAK_POLL_INTERVAL_MS = 5 * 60 * 1000;
+  private static readonly PEAK_LOOKBACK_DAYS = 7;
+
+  // Insider-cluster dedup: `${chatId}:${mint}` → last-alert timestamp.
+  // Prevents spamming a user when the same insider cluster keeps firing.
+  private insiderClusterAlerted = new Map<string, number>();
+  private static readonly INSIDER_DEDUP_MS = 5 * 60 * 1000;
+  private static readonly INSIDER_WINDOW_SEC = 60;
+  private static readonly INSIDER_MIN_WALLETS = 3;
+
   constructor(
     private config: ConfigService,
     private prisma: PrismaService,
@@ -69,12 +81,92 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         if (trimmed) await this.watchWallet(trimmed, null);
       }
     }
+
+    // Kick off peak-MC poller (fire-and-forget). First run is delayed a minute
+    // so the app finishes booting before we start hitting external APIs.
+    this.peakPollTimer = setInterval(
+      () => {
+        this.pollTokenPeaks().catch((err) =>
+          this.logger.error(`Peak poll failed: ${err.message}`),
+        );
+      },
+      SolanaService.PEAK_POLL_INTERVAL_MS,
+    );
+    setTimeout(
+      () =>
+        this.pollTokenPeaks().catch((err) =>
+          this.logger.error(`Initial peak poll failed: ${err.message}`),
+        ),
+      60_000,
+    );
   }
 
   onModuleDestroy() {
     this.watchedWallets.forEach(({ subId }) => {
       this.connection.removeOnLogsListener(subId).catch(() => {});
     });
+    if (this.peakPollTimer) {
+      clearInterval(this.peakPollTimer);
+      this.peakPollTimer = null;
+    }
+  }
+
+  /**
+   * Update TokenPeak for every mint that's been called in a group in the last
+   * PEAK_LOOKBACK_DAYS. Uses DexScreener FDV as market cap proxy. Bumps
+   * peakMcUsd only when current > peak. Runs every PEAK_POLL_INTERVAL_MS.
+   */
+  private async pollTokenPeaks(): Promise<void> {
+    const since = new Date(
+      Date.now() - SolanaService.PEAK_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+    );
+    const called = await this.prisma.groupTokenCall.findMany({
+      where: { calledAt: { gte: since } },
+      select: { mint: true },
+      distinct: ['mint'],
+    });
+    const mints = called.map((c) => c.mint);
+    if (mints.length === 0) return;
+
+    const currentMcs = await this.getCurrentMarketCaps(mints);
+    const now = new Date();
+    let updated = 0;
+
+    for (const [mint, currentMc] of currentMcs) {
+      if (currentMc <= 0) continue;
+      const existing = await this.prisma.tokenPeak.findUnique({
+        where: { mint },
+      });
+      if (!existing) {
+        await this.prisma.tokenPeak.create({
+          data: {
+            mint,
+            peakMcUsd: currentMc,
+            peakAt: now,
+            lastCheckedAt: now,
+            lastMcUsd: currentMc,
+          },
+        });
+        updated++;
+      } else if (currentMc > existing.peakMcUsd) {
+        await this.prisma.tokenPeak.update({
+          where: { mint },
+          data: {
+            peakMcUsd: currentMc,
+            peakAt: now,
+            lastCheckedAt: now,
+            lastMcUsd: currentMc,
+          },
+        });
+        updated++;
+      } else {
+        await this.prisma.tokenPeak.update({
+          where: { mint },
+          data: { lastCheckedAt: now, lastMcUsd: currentMc },
+        });
+      }
+    }
+    this.logger.log(`Peak poll: ${mints.length} mints checked, ${updated} peaks updated`);
   }
   private async initWalletSubscription(address: string): Promise<number> {
     if (this.watchedWallets.has(address)) {
@@ -941,9 +1033,10 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       callerId: number;
       username: string;
       calls: number;
-      avgGainPct: number;
-      bestGainPct: number;
-      winRate: number; // fraction of calls with >=100% gain (2x+)
+      avgPeakGainPct: number;
+      avgNowGainPct: number;
+      bestPeakGainPct: number;
+      winRate: number; // fraction of calls with >= 100% peak gain (2x+)
     }[]
   > {
     // Fetch all calls with a real caller in this group.
@@ -975,51 +1068,76 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     }
     if (firstPerMint.size === 0) return [];
 
-    // Fetch current MCs for all discovered mints.
     const mints = Array.from(firstPerMint.keys());
-    const currentMcs = await this.getCurrentMarketCaps(mints);
 
-    // Aggregate per caller.
+    // Prefer stored peak MCs; fall back to current MC lookup for any missing.
+    const peaks = await this.prisma.tokenPeak.findMany({
+      where: { mint: { in: mints } },
+      select: { mint: true, peakMcUsd: true, lastMcUsd: true },
+    });
+    const peakByMint = new Map<string, { peak: number; last: number }>();
+    for (const p of peaks) {
+      peakByMint.set(p.mint, { peak: p.peakMcUsd, last: p.lastMcUsd });
+    }
+    const missing = mints.filter((m) => !peakByMint.has(m));
+    if (missing.length > 0) {
+      const liveMcs = await this.getCurrentMarketCaps(missing);
+      for (const [m, mc] of liveMcs) {
+        peakByMint.set(m, { peak: mc, last: mc });
+      }
+    }
+
+    // Aggregate per caller — track BOTH peak gain (best-case since call) and
+    // current gain (right-now).
     const perCaller = new Map<
       string,
       {
         callerId: number;
         username: string;
-        gains: number[];
+        peakGains: number[];
+        nowGains: number[];
       }
     >();
     for (const [mint, first] of firstPerMint) {
-      const currentMc = currentMcs.get(mint);
-      if (currentMc === undefined) continue; // no live pair — skip
-      const gainPct = ((currentMc - first.mcAtCall) / first.mcAtCall) * 100;
+      const stats = peakByMint.get(mint);
+      if (!stats) continue;
+      const peakGainPct =
+        ((Math.max(stats.peak, stats.last) - first.mcAtCall) /
+          first.mcAtCall) *
+        100;
+      const nowGainPct = ((stats.last - first.mcAtCall) / first.mcAtCall) * 100;
       const key = String(first.callerId);
       const entry = perCaller.get(key) ?? {
         callerId: Number(first.callerId),
         username: first.username,
-        gains: [],
+        peakGains: [],
+        nowGains: [],
       };
-      entry.gains.push(gainPct);
-      // Prefer the most recent non-empty username.
+      entry.peakGains.push(peakGainPct);
+      entry.nowGains.push(nowGainPct);
       if (first.username && !entry.username) entry.username = first.username;
       perCaller.set(key, entry);
     }
 
     const results = Array.from(perCaller.values())
       .map((c) => {
-        const calls = c.gains.length;
-        const avgGainPct = c.gains.reduce((s, g) => s + g, 0) / calls;
-        const bestGainPct = Math.max(...c.gains);
-        const wins = c.gains.filter((g) => g >= 100).length;
+        const calls = c.peakGains.length;
+        const avgPeakGainPct =
+          c.peakGains.reduce((s, g) => s + g, 0) / calls;
+        const avgNowGainPct = c.nowGains.reduce((s, g) => s + g, 0) / calls;
+        const bestPeakGainPct = Math.max(...c.peakGains);
+        const wins = c.peakGains.filter((g) => g >= 100).length;
         return {
           callerId: c.callerId,
           username: c.username,
           calls,
-          avgGainPct,
-          bestGainPct,
+          avgPeakGainPct,
+          avgNowGainPct,
+          bestPeakGainPct,
           winRate: wins / calls,
         };
       })
-      .sort((a, b) => b.avgGainPct - a.avgGainPct);
+      .sort((a, b) => b.avgPeakGainPct - a.avgPeakGainPct);
 
     return results;
   }
@@ -1480,6 +1598,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       const clusterSince = new Date(
         Date.now() - CLUSTER_WINDOW_MIN * 60 * 1000,
       );
+      const insiderSince = new Date(
+        Date.now() - SolanaService.INSIDER_WINDOW_SEC * 1000,
+      );
       const perUserCluster = new Map<
         number,
         { count: number; windowMinutes: number }
@@ -1488,12 +1609,18 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         for (const w of watchers) {
           const chatId = Number(w.userId);
           const userWatched = await this.prisma.watchedWallet.findMany({
-            where: { userId: w.userId },
-            select: { walletAddress: true },
+            where: { userId: w.userId, paused: false },
+            select: { walletAddress: true, label: true },
           });
           const addrs = userWatched.map((u) => u.walletAddress);
           if (addrs.length < 2) continue;
-          const priorBuys = await this.prisma.trade.groupBy({
+
+          const labelByAddr = new Map(
+            userWatched.map((u) => [u.walletAddress, u.label ?? '']),
+          );
+
+          // Wide cluster (30 min) — inline "Nth wallet in 30m" line.
+          const priorBuys30m = await this.prisma.trade.groupBy({
             by: ['walletAddress'],
             where: {
               walletAddress: { in: addrs, not: walletAddress },
@@ -1502,13 +1629,57 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
               timestamp: { gte: clusterSince },
             },
           });
-          const uniqueOther = priorBuys.length;
-          if (uniqueOther >= 1) {
-            // current trade counts too — that's why total = uniqueOther + 1
+          if (priorBuys30m.length >= 1) {
             perUserCluster.set(chatId, {
-              count: uniqueOther + 1,
+              count: priorBuys30m.length + 1,
               windowMinutes: CLUSTER_WINDOW_MIN,
             });
+          }
+
+          // Tight insider cluster (60s) — separate 🚨 alert. Fires when 3+
+          // distinct wallets they track buy the same mint inside the window.
+          const priorBuys60s = await this.prisma.trade.findMany({
+            where: {
+              walletAddress: { in: addrs, not: walletAddress },
+              tokenMint: action.inMint,
+              type: 'BUY',
+              timestamp: { gte: insiderSince },
+            },
+            select: {
+              walletAddress: true,
+              timestamp: true,
+              totalUsd: true,
+              solAmount: true,
+            },
+            orderBy: { timestamp: 'asc' },
+          });
+          const buyerSet = new Set(priorBuys60s.map((b) => b.walletAddress));
+          buyerSet.add(walletAddress); // include the current trade
+          if (buyerSet.size >= SolanaService.INSIDER_MIN_WALLETS) {
+            const dedupKey = `${chatId}:${action.inMint}`;
+            const lastAlert = this.insiderClusterAlerted.get(dedupKey) ?? 0;
+            if (Date.now() - lastAlert >= SolanaService.INSIDER_DEDUP_MS) {
+              this.insiderClusterAlerted.set(dedupKey, Date.now());
+              this.sendInsiderClusterAlert(chatId, {
+                mint: action.inMint,
+                symbol:
+                  action.inSymbol ||
+                  `${action.inMint.slice(0, 4)}...${action.inMint.slice(-4)}`,
+                name: action.inName,
+                marketCap,
+                currentWallet: walletAddress,
+                currentUsd: action.usdValue,
+                priorBuys: priorBuys60s.map((b) => ({
+                  address: b.walletAddress,
+                  label: labelByAddr.get(b.walletAddress) ?? '',
+                  totalUsd: b.totalUsd,
+                  solAmount: b.solAmount,
+                  timestamp: b.timestamp,
+                })),
+                currentLabel: labelByAddr.get(walletAddress) ?? '',
+                signature,
+              });
+            }
           }
         }
       }
@@ -1822,6 +1993,95 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  private sendInsiderClusterAlert(
+    chatId: number,
+    ctx: {
+      mint: string;
+      symbol: string;
+      name: string;
+      marketCap: number;
+      currentWallet: string;
+      currentUsd: number;
+      currentLabel: string;
+      priorBuys: {
+        address: string;
+        label: string;
+        totalUsd: number;
+        solAmount: number;
+        timestamp: Date;
+      }[];
+      signature: string;
+    },
+  ): void {
+    const short = (a: string) => `${a.slice(0, 6)}...${a.slice(-4)}`;
+    const timeAgo = (d: Date): string => {
+      const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+      return `${s}s ago`;
+    };
+
+    const walletLine = (
+      addr: string,
+      label: string,
+      totalUsd: number,
+      when: string,
+    ): string => {
+      const handle = label
+        ? `<b>${label}</b>  ·  <code>${short(addr)}</code>`
+        : `<code>${short(addr)}</code>`;
+      const usd = totalUsd > 0 ? `  ·  ~$${totalUsd.toFixed(2)}` : '';
+      return `   • ${handle}${usd}  ·  <i>${when}</i>`;
+    };
+
+    const priorLines = ctx.priorBuys
+      .map((b) => walletLine(b.address, b.label, b.totalUsd, timeAgo(b.timestamp)))
+      .join('\n');
+    const currentLine = walletLine(
+      ctx.currentWallet,
+      ctx.currentLabel,
+      ctx.currentUsd,
+      'just now',
+    );
+
+    const mcFmt =
+      ctx.marketCap > 0
+        ? ctx.marketCap >= 1_000_000_000
+          ? `$${(ctx.marketCap / 1_000_000_000).toFixed(2)}B`
+          : ctx.marketCap >= 1_000_000
+            ? `$${(ctx.marketCap / 1_000_000).toFixed(2)}M`
+            : `$${(ctx.marketCap / 1_000).toFixed(1)}K`
+        : '?';
+
+    const count = ctx.priorBuys.length + 1;
+    const tokenLabel = ctx.name
+      ? `<b>${ctx.name}</b> ($${ctx.symbol})`
+      : `$${ctx.symbol}`;
+
+    const msg =
+      `🚨 <b>INSIDER CLUSTER</b>  ·  ${count} wallets in ${SolanaService.INSIDER_WINDOW_SEC}s\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `🪙 ${tokenLabel}\n` +
+      `📊 MC: <b>${mcFmt}</b>\n` +
+      `<code>${ctx.mint}</code>\n\n` +
+      `${priorLines}\n${currentLine}`;
+
+    this.bot.telegram
+      .sendMessage(chatId, msg, {
+        parse_mode: 'HTML',
+        // @ts-ignore
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: this.buildTradeButtons(
+            ctx.mint,
+            ctx.signature,
+            ctx.currentWallet,
+          ),
+        },
+      })
+      .catch((err) =>
+        this.logger.error(`Insider alert to ${chatId} failed: ${err.message}`),
+      );
+  }
+
   private formatTransferMessage(
     walletAddress: string,
     signature: string,
@@ -1978,8 +2238,14 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         return { success: false, message: 'No transactions found' };
       }
 
+      // Use current SOL price as an approximation for historical USD values.
+      // Not perfectly accurate for old trades but far better than 0, and lets
+      // FIFO PnL / positions actually compute for backfilled data.
+      const solPrice = (await this.getSolPrice()).price;
+
       let processed = 0;
       let errors = 0;
+      let skippedTransfer = 0;
 
       for (const sig of sigsRes) {
         try {
@@ -1990,8 +2256,15 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
           const action = this.detectAction(tx, address);
           if (!action) continue;
+          if (action.type === 'TRANSFER') {
+            skippedTransfer++;
+            continue;
+          }
 
-          // Store trade in database
+          const totalUsd = action.solAmount * solPrice;
+          const priceUsd =
+            action.tokenAmount > 0 ? totalUsd / action.tokenAmount : 0;
+
           await this.prisma.trade.upsert({
             where: { signature: sig.signature },
             create: {
@@ -2001,6 +2274,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
               tokenSymbol: action.tokenSymbol,
               tokenName: action.tokenName,
               tokenAmount: action.tokenAmount,
+              priceUsd,
+              totalUsd,
               solAmount: action.solAmount,
               signature: sig.signature,
               timestamp: sig.blockTime
@@ -2015,9 +2290,12 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
+      const note = solPrice > 0
+        ? '\n<i>USD values estimated using current SOL price — historical prices not looked up.</i>'
+        : '';
       return {
         success: true,
-        message: `Backfilled ${processed} trades${errors > 0 ? ` (${errors} errors)` : ''}`,
+        message: `Backfilled ${processed} trades${errors > 0 ? ` (${errors} errors)` : ''}${skippedTransfer > 0 ? `\nSkipped ${skippedTransfer} non-trade transfers.` : ''}${note}`,
       };
     } catch (err) {
       return { success: false, message: `Error: ${err.message}` };
@@ -2318,6 +2596,183 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     );
 
     return lines.join('\n');
+  }
+
+  /**
+   * Ranks a user's watched wallets by all-time realized + unrealized PnL.
+   * Reuses computeFifoPnl per wallet and prices open lots via a single
+   * batched Jupiter call. Skips wallets with no priced trades.
+   */
+  async getWalletLeaderboard(chatId: number): Promise<
+    {
+      address: string;
+      label: string;
+      totalPnl: number;
+      totalPnlPct: number;
+      realized: number;
+      unrealized: number;
+      totalBought: number;
+      tokenCount: number;
+      trades: number;
+      wins: number;
+      losses: number;
+      winRate: number;
+      lastTradeAt: Date | null;
+    }[]
+  > {
+    const watched = await this.prisma.watchedWallet.findMany({
+      where: { userId: chatId },
+      select: { walletAddress: true, label: true },
+    });
+    if (watched.length === 0) return [];
+
+    // Compute FIFO per wallet first (cheap in memory; DB is the hot path).
+    const fifoResults = await Promise.all(
+      watched.map(async (w) => ({
+        address: w.walletAddress,
+        label: w.label ?? '',
+        ...(await this.computeFifoPnl(w.walletAddress)),
+      })),
+    );
+
+    // Collect every open mint across all wallets and price once.
+    const openMints = new Set<string>();
+    for (const r of fifoResults) {
+      for (const e of r.perMint.values()) {
+        if (e.lots.length > 0) openMints.add(e.mint);
+      }
+    }
+    const prices = await this.getCurrentPrices(Array.from(openMints));
+
+    const rows = fifoResults
+      .map((r) => {
+        let realized = 0;
+        let unrealized = 0;
+        let totalBought = 0;
+        let wins = 0;
+        let losses = 0;
+        let trades = 0;
+        let lastTradeAt: Date | null = null;
+        let tokenCount = 0;
+
+        for (const e of r.perMint.values()) {
+          realized += e.realizedUsd;
+          totalBought += e.totalBoughtUsd;
+          trades += e.trades;
+          tokenCount++;
+          if (!lastTradeAt || e.lastTradeAt > lastTradeAt)
+            lastTradeAt = e.lastTradeAt;
+          for (const p of e.closedPnls) {
+            if (p > 0) wins++;
+            else if (p < 0) losses++;
+          }
+          if (e.lots.length > 0) {
+            const remaining = e.lots.reduce((s, l) => s + l.amount, 0);
+            const remainingCost = e.lots.reduce((s, l) => s + l.costUsd, 0);
+            const currentPrice = prices.get(e.mint) ?? 0;
+            if (currentPrice > 0)
+              unrealized += remaining * currentPrice - remainingCost;
+          }
+        }
+
+        const totalPnl = realized + unrealized;
+        const totalPnlPct = totalBought > 0 ? (totalPnl / totalBought) * 100 : 0;
+        const winRate =
+          wins + losses > 0 ? (wins / (wins + losses)) * 100 : 0;
+
+        return {
+          address: r.address,
+          label: r.label,
+          totalPnl,
+          totalPnlPct,
+          realized,
+          unrealized,
+          totalBought,
+          tokenCount,
+          trades,
+          wins,
+          losses,
+          winRate,
+          lastTradeAt,
+        };
+      })
+      // Drop wallets we can't score yet — hide the noise floor.
+      .filter((r) => r.totalBought > 0)
+      .sort((a, b) => b.totalPnl - a.totalPnl);
+
+    return rows;
+  }
+
+  /**
+   * Returns recent BUYs by a chat's tracked wallets for a specific mint.
+   * Used to power the "tracked wallets buying this" section on token cards.
+   * Groups by wallet — returns each wallet's most-recent buy + running total.
+   */
+  async getRecentTrackedBuysForMint(
+    chatId: number,
+    mint: string,
+    hours: number,
+  ): Promise<
+    {
+      walletAddress: string;
+      label: string;
+      lastBuyAt: Date;
+      buys: number;
+      totalUsd: number;
+    }[]
+  > {
+    const watched = await this.prisma.watchedWallet.findMany({
+      where: { userId: chatId },
+      select: { walletAddress: true, label: true },
+    });
+    if (watched.length === 0) return [];
+
+    const addrs = watched.map((w) => w.walletAddress);
+    const labels = new Map(watched.map((w) => [w.walletAddress, w.label ?? '']));
+
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+    const trades = await this.prisma.trade.findMany({
+      where: {
+        walletAddress: { in: addrs },
+        tokenMint: mint,
+        type: 'BUY',
+        timestamp: { gte: since },
+      },
+      orderBy: { timestamp: 'desc' },
+      select: {
+        walletAddress: true,
+        timestamp: true,
+        totalUsd: true,
+      },
+    });
+    if (trades.length === 0) return [];
+
+    const perWallet = new Map<
+      string,
+      { lastBuyAt: Date; buys: number; totalUsd: number }
+    >();
+    for (const t of trades) {
+      const cur = perWallet.get(t.walletAddress);
+      if (cur) {
+        cur.buys++;
+        cur.totalUsd += t.totalUsd;
+        if (t.timestamp > cur.lastBuyAt) cur.lastBuyAt = t.timestamp;
+      } else {
+        perWallet.set(t.walletAddress, {
+          lastBuyAt: t.timestamp,
+          buys: 1,
+          totalUsd: t.totalUsd,
+        });
+      }
+    }
+
+    return Array.from(perWallet.entries())
+      .map(([addr, v]) => ({
+        walletAddress: addr,
+        label: labels.get(addr) ?? '',
+        ...v,
+      }))
+      .sort((a, b) => b.lastBuyAt.getTime() - a.lastBuyAt.getTime());
   }
 
   /**

@@ -29,6 +29,7 @@ type PendingAction =
   | 'unwatch'
   | 'portfolio'
   | 'pnl'
+  | 'positions'
   | 'txhistory'
   | 'price'
   | 'minsize'
@@ -83,17 +84,18 @@ function mainMenuKeyboard(): InlineKeyboardMarkup {
         { text: '📋 My List', callback_data: 'menu_list' },
       ],
       [
+        { text: '🏆 Top Wallets', callback_data: 'menu_topwallets' },
         { text: '💼 Portfolio', callback_data: 'menu_portfolio' },
+      ],
+      [
         { text: '📜 TX History', callback_data: 'menu_txhistory' },
-      ],
-      [
         { text: '💲 Token Price', callback_data: 'menu_price' },
-        { text: '⚙️ Min Size', callback_data: 'menu_minsize' },
       ],
       [
+        { text: '⚙️ Min Size', callback_data: 'menu_minsize' },
         { text: '📊 Stats', callback_data: 'menu_stats' },
-        { text: '❓ Help', callback_data: 'menu_help' },
       ],
+      [{ text: '❓ Help', callback_data: 'menu_help' }],
     ],
   };
 }
@@ -103,21 +105,24 @@ function walletKeyboard(address: string, paused = false): InlineKeyboardMarkup {
     inline_keyboard: [
       [
         { text: '💼 Portfolio', callback_data: `wallet_portfolio:${address}` },
-        { text: '📊 PnL Analysis', callback_data: `wallet_pnl:${address}` },
+        { text: '📈 Positions', callback_data: `wallet_positions:${address}` },
       ],
       [
+        { text: '📊 PnL Analysis', callback_data: `wallet_pnl:${address}` },
         { text: '📜 TX History', callback_data: `wallet_txhistory:${address}` },
+      ],
+      [
         {
           text: '🔄 Backfill Trades',
           callback_data: `wallet_backfill:${address}`,
         },
-      ],
-      [
         { text: '🏷 Label', callback_data: `wallet_label:${address}` },
-        { text: '🏴 Tags', callback_data: `wallet_tags:${address}` },
       ],
       [
+        { text: '🏴 Tags', callback_data: `wallet_tags:${address}` },
         { text: '⚙️ Min Size', callback_data: `wallet_minsize:${address}` },
+      ],
+      [
         {
           text: paused ? '▶️ Unpause' : '⏸ Pause',
           callback_data: paused
@@ -239,7 +244,7 @@ export class BotUpdate {
         `<b>Wallets</b>\n` +
         `/watch /unwatch /list /label /tag /untag\n\n` +
         `<b>Insights</b>\n` +
-        `/portfolio /txhistory /pnl /backfill /price\n\n` +
+        `/topwallets /portfolio /positions /pnl /txhistory /backfill /price\n\n` +
         `<b>Groups</b>\n` +
         `/trending /leaderboard\n\n` +
         `<b>Settings</b>\n` +
@@ -348,6 +353,85 @@ export class BotUpdate {
     await ctx.reply(text, { parse_mode: 'HTML', reply_markup: keyboard });
   }
 
+  @Command('topwallets')
+  async onTopWallets(@Ctx() ctx: Context): Promise<void> {
+    await this.trackUser(ctx);
+    const loading = await ctx.reply('⏳ Scoring your tracked wallets...');
+    try {
+      const board = await this.solanaService.getWalletLeaderboard(
+        ctx.chat.id,
+      );
+      if (board.length === 0) {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          (loading as any).message_id,
+          undefined,
+          `📊 <b>Wallet Leaderboard</b>\n\nNo scored wallets yet. Add wallets with /watch, then run /backfill on each to score historical trades — new trades are priced automatically.`,
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+
+      const top = board.slice(0, 10);
+      const sign = (n: number) => (n >= 0 ? '+' : '');
+      const emoji = (n: number) => (n >= 0 ? '🟢' : '🔴');
+
+      const rows = top.map((w, i) => {
+        const rank =
+          i === 0
+            ? '🥇'
+            : i === 1
+              ? '🥈'
+              : i === 2
+                ? '🥉'
+                : ` ${i + 1}.`;
+        const short = `${w.address.slice(0, 6)}...${w.address.slice(-4)}`;
+        const handle = w.label
+          ? `<b>${w.label}</b>  ·  <code>${short}</code>`
+          : `<code>${short}</code>`;
+        const scanLink = `<a href="https://solscan.io/account/${w.address}">📎</a>`;
+        const winPct = w.winRate.toFixed(0);
+        return (
+          `${rank} ${handle} ${scanLink}\n` +
+          `   ${emoji(w.totalPnl)} PnL <b>${sign(w.totalPnl)}$${w.totalPnl.toFixed(2)}</b> ` +
+          `(${sign(w.totalPnlPct)}${w.totalPnlPct.toFixed(1)}%)  ·  ` +
+          `🎯 ${winPct}%W\n` +
+          `   💵 Realized <b>${sign(w.realized)}$${w.realized.toFixed(2)}</b>  ·  ` +
+          `📈 Unrealized <b>${sign(w.unrealized)}$${w.unrealized.toFixed(2)}</b>\n` +
+          `   📊 ${w.tokenCount} token${w.tokenCount !== 1 ? 's' : ''}  ·  ` +
+          `${w.trades} trades  ·  ${w.wins}W / ${w.losses}L`
+        );
+      });
+
+      const scoreable = board.length;
+      const totalPnl = board.reduce((s, w) => s + w.totalPnl, 0);
+      const totalPnlEmoji = emoji(totalPnl);
+
+      const text =
+        `🏆 <b>Wallet Leaderboard</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `${totalPnlEmoji} Combined PnL: <b>${sign(totalPnl)}$${totalPnl.toFixed(2)}</b> across ${scoreable} scored wallet${scoreable !== 1 ? 's' : ''}\n\n` +
+        rows.join('\n\n') +
+        `\n\n<i>Realized + unrealized. Only wallets with priced trades are scored. Use /backfill on a wallet to import history.</i>`;
+
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        text,
+        { parse_mode: 'HTML', disable_web_page_preview: true } as any,
+      );
+    } catch (err) {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        `❌ Could not build wallet leaderboard. Please try again.`,
+        { parse_mode: 'HTML' },
+      );
+    }
+  }
+
   @Command('leaderboard')
   async onLeaderboard(@Ctx() ctx: Context): Promise<void> {
     if (!isGroup(ctx)) {
@@ -384,15 +468,17 @@ export class BotUpdate {
                 ? '🥉'
                 : ` ${i + 1}.`;
         const handle = c.username ? `@${c.username}` : `user ${c.callerId}`;
-        const avgEmoji = c.avgGainPct >= 0 ? '🟢' : '🔴';
-        const avgSign = c.avgGainPct >= 0 ? '+' : '';
-        const bestSign = c.bestGainPct >= 0 ? '+' : '';
+        const peakEmoji = c.avgPeakGainPct >= 0 ? '🟢' : '🔴';
+        const peakSign = c.avgPeakGainPct >= 0 ? '+' : '';
+        const nowSign = c.avgNowGainPct >= 0 ? '+' : '';
+        const bestSign = c.bestPeakGainPct >= 0 ? '+' : '';
         const winPct = (c.winRate * 100).toFixed(0);
         return (
           `${rank} <b>${handle}</b>\n` +
           `   📞 ${c.calls} call${c.calls !== 1 ? 's' : ''}  ·  ` +
-          `${avgEmoji} avg <b>${avgSign}${c.avgGainPct.toFixed(1)}%</b>  ·  ` +
-          `🏆 best <b>${bestSign}${c.bestGainPct.toFixed(1)}%</b>  ·  ` +
+          `${peakEmoji} avg peak <b>${peakSign}${c.avgPeakGainPct.toFixed(1)}%</b>  ·  ` +
+          `now <b>${nowSign}${c.avgNowGainPct.toFixed(1)}%</b>\n` +
+          `   🏆 best <b>${bestSign}${c.bestPeakGainPct.toFixed(1)}%</b>  ·  ` +
           `🎯 2x rate <b>${winPct}%</b>`
         );
       });
@@ -400,7 +486,7 @@ export class BotUpdate {
       const text =
         `📊 <b>Caller Leaderboard</b>\n└ ${groupName}\n\n` +
         rows.join('\n\n') +
-        `\n\n<i>Ranked by average % gain since first call. Only first-callers of a token get credit.</i>`;
+        `\n\n<i>Ranked by average peak % gain since call. "now" is current MC. Only first-callers of a token get credit.</i>`;
 
       await ctx.telegram.editMessageText(
         ctx.chat.id,
@@ -507,6 +593,20 @@ export class BotUpdate {
     pendingAction.set(ctx.chat.id, 'pnl');
     await ctx.reply(
       `📊 <b>PnL Analysis</b>\n\nPaste the Solana wallet address to analyse:`,
+      { parse_mode: 'HTML' },
+    );
+  }
+
+  @Command('positions')
+  async onPositions(@Ctx() ctx: Context): Promise<void> {
+    const address = this.extractArg(ctx);
+    if (address) {
+      await this.showOpenPositions(ctx, address);
+      return;
+    }
+    pendingAction.set(ctx.chat.id, 'positions');
+    await ctx.reply(
+      `📈 <b>Open Positions</b>\n\nPaste the Solana wallet address to inspect:`,
       { parse_mode: 'HTML' },
     );
   }
@@ -684,6 +784,12 @@ export class BotUpdate {
     await ctx.reply(stats, { parse_mode: 'HTML' });
   }
 
+  @Action('menu_topwallets')
+  async onMenuTopWallets(@Ctx() ctx: Context): Promise<void> {
+    await ctx.answerCbQuery();
+    await this.onTopWallets(ctx);
+  }
+
   @Action('menu_help')
   async onMenuHelp(@Ctx() ctx: Context): Promise<void> {
     await ctx.answerCbQuery();
@@ -692,7 +798,7 @@ export class BotUpdate {
         `<b>Wallets</b>\n` +
         `/watch /unwatch /list /label /tag /untag\n\n` +
         `<b>Insights</b>\n` +
-        `/portfolio /txhistory /pnl /backfill /price\n\n` +
+        `/topwallets /portfolio /positions /pnl /txhistory /backfill /price\n\n` +
         `<b>Groups</b>\n` +
         `/trending /leaderboard\n\n` +
         `<b>Settings</b>\n` +
@@ -738,6 +844,12 @@ export class BotUpdate {
   async onWalletPnl(@Ctx() ctx: Context): Promise<void> {
     await ctx.answerCbQuery();
     await this.showPnlAnalysis(ctx, (ctx as any).match[1]);
+  }
+
+  @Action(/^wallet_positions:(.+)$/)
+  async onWalletPositions(@Ctx() ctx: Context): Promise<void> {
+    await ctx.answerCbQuery();
+    await this.showOpenPositions(ctx, (ctx as any).match[1]);
   }
 
   @Action(/^wallet_backfill:(.+)$/)
@@ -911,6 +1023,7 @@ export class BotUpdate {
     else if (action === 'unwatch') await this.removeWallet(ctx, input);
     else if (action === 'portfolio') await this.showPortfolio(ctx, input);
     else if (action === 'pnl') await this.showPnlAnalysis(ctx, input);
+    else if (action === 'positions') await this.showOpenPositions(ctx, input);
     else if (action === 'txhistory') await this.showTxHistory(ctx, input);
     else if (action === 'price') await this.showPrice(ctx, input);
     else if (action === 'minsize') await this.setMinSize(ctx, input);
@@ -1121,7 +1234,11 @@ export class BotUpdate {
         (loading as any).message_id,
         undefined,
         result,
-        { parse_mode: 'HTML', reply_markup: walletKeyboard(address) },
+        {
+          parse_mode: 'HTML',
+          reply_markup: walletKeyboard(address),
+          disable_web_page_preview: true,
+        } as any,
       );
     } catch {
       await ctx.telegram.editMessageText(
@@ -1129,6 +1246,40 @@ export class BotUpdate {
         (loading as any).message_id,
         undefined,
         `❌ Failed to load PnL analysis. Please try again.`,
+        { parse_mode: 'HTML' },
+      );
+    }
+  }
+
+  private async showOpenPositions(
+    ctx: Context,
+    address: string,
+  ): Promise<void> {
+    const chainErr = this.solanaService.chainErrorMessage(address);
+    if (chainErr) {
+      await ctx.reply(chainErr, { parse_mode: 'HTML' });
+      return;
+    }
+    const loading = await ctx.reply('⏳ Loading open positions...');
+    try {
+      const result = await this.solanaService.getOpenPositions(address);
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        result,
+        {
+          parse_mode: 'HTML',
+          reply_markup: walletKeyboard(address),
+          disable_web_page_preview: true,
+        } as any,
+      );
+    } catch {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        (loading as any).message_id,
+        undefined,
+        `❌ Failed to load open positions. Please try again.`,
         { parse_mode: 'HTML' },
       );
     }
@@ -1218,7 +1369,34 @@ export class BotUpdate {
           .catch(() => {});
       }
 
-      const finalText = firstCallerNote + text;
+      // "Tracked wallets buying this" section — pulls from the Trade table.
+      // For groups this reads the group's tracked wallets; for DMs, the user's.
+      let trackedActivityNote = '';
+      const recentBuys = await this.solanaService
+        .getRecentTrackedBuysForMint(ctx.chat.id, mint, 24)
+        .catch(() => [] as Awaited<ReturnType<typeof this.solanaService.getRecentTrackedBuysForMint>>);
+      if (recentBuys.length > 0) {
+        const shown = recentBuys.slice(0, 5);
+        const rest = recentBuys.length - shown.length;
+        const lines = shown.map((b) => {
+          const short = `${b.walletAddress.slice(0, 6)}...${b.walletAddress.slice(-4)}`;
+          const who = b.label
+            ? `<b>${b.label}</b>  ·  <code>${short}</code>`
+            : `<code>${short}</code>`;
+          const usd = b.totalUsd > 0 ? `~$${b.totalUsd.toFixed(2)}` : 'unknown';
+          const times = b.buys > 1 ? ` (${b.buys} buys)` : '';
+          const ago = this.humanTimeAgo(b.lastBuyAt);
+          return `   • ${who}  ·  ${usd}${times}  ·  <i>${ago}</i>`;
+        });
+        const more = rest > 0 ? `\n   • …and ${rest} more` : '';
+        trackedActivityNote =
+          `👛 <b>Your tracked wallets bought this (24h)</b>\n` +
+          lines.join('\n') +
+          more +
+          `\n\n`;
+      }
+
+      const finalText = firstCallerNote + trackedActivityNote + text;
 
       if (imageUrl) {
         await ctx.replyWithPhoto(imageUrl, {
