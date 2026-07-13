@@ -1,1 +1,1 @@
-web: pnpm prisma migrate deploy && node dist/main
+web: npx prisma migrate deploy && node dist/main
