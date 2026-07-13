@@ -7,61 +7,78 @@ datasource db {
 }
 
 model GroupTokenCall {
-  id       String   @id
-  groupId  BigInt
-  mint     String
-  symbol   String   @default("")
-  name     String   @default("")
-  calledAt DateTime @default(now())
+  id             String   @id @default(cuid())
+  groupId        BigInt
+  mint           String
+  symbol         String   @default("")
+  name           String   @default("")
+  calledAt       DateTime @default(now())
+  callerId       BigInt   @default(0) // Telegram user id who posted the CA (0 = unknown / pre-migration)
+  callerUsername String   @default("")
+  priceAtCall    Float    @default(0) // token price at call time (USD)
+  mcAtCall       Float    @default(0) // market cap at call time (USD)
 
   @@index([groupId, calledAt])
   @@index([groupId, mint])
+  @@index([groupId, callerId])
+}
+
+model TokenPeak {
+  mint          String   @id
+  peakMcUsd     Float    @default(0)
+  peakAt        DateTime @default(now())
+  lastCheckedAt DateTime @default(now())
+  lastMcUsd     Float    @default(0)
 }
 
 model Trade {
-  id            String   @id
-  walletAddress String
-  type          String
-  tokenMint     String
-  tokenSymbol   String
-  tokenName     String   @default("")
-  tokenAmount   Float
-  priceUsd      Float    @default(0)
-  totalUsd      Float    @default(0)
-  marketCapUsd  Float    @default(0)
-  solAmount     Float    @default(0)
-  signature     String   @unique
-  timestamp     DateTime @default(now())
-  Wallet        Wallet   @relation(fields: [walletAddress], references: [address])
+  id             String           @id @default(cuid())
+  walletAddress  String
+  wallet         Wallet           @relation(fields: [walletAddress], references: [address])
+  type           String           // 'BUY' | 'SELL' | 'SWAP'
+  tokenMint      String           // the primary token (received on BUY, spent on SELL)
+  tokenSymbol    String
+  tokenName      String           @default("")
+  tokenAmount    Float            // amount of token
+  priceUsd       Float            @default(0) // price per token at trade time
+  totalUsd       Float            @default(0) // total USD value
+  marketCapUsd   Float            @default(0) // mcap at trade time
+  solAmount      Float            @default(0)
+  signature      String           @unique
+  timestamp      DateTime         @default(now())
 
-  @@index([walletAddress, timestamp])
   @@index([walletAddress, tokenMint])
+  @@index([walletAddress, timestamp])
 }
 
 model User {
-  id            BigInt          @id
-  username      String?
-  minTradeSize  Float           @default(0)
-  firstSeen     DateTime        @default(now())
-  lastSeen      DateTime
-  WatchedWallet WatchedWallet[]
+  id             BigInt           @id // Telegram chatId
+  username       String?
+  minTradeSize   Float            @default(0)
+  firstSeen      DateTime         @default(now())
+  lastSeen       DateTime         @updatedAt
+  
+  // Relations
+  watchedWallets WatchedWallet[]
 }
 
 model Wallet {
-  address       String          @id
-  Trade         Trade[]
-  WatchedWallet WatchedWallet[]
+  address        String           @id // Solana address
+  
+  // Relations
+  watchers       WatchedWallet[]
+  trades         Trade[]
 }
 
 model WatchedWallet {
-  userId        BigInt
-  walletAddress String
-  label         String?
-  tags          String[] @default([])
-  paused        Boolean  @default(false)
-  minTradeSize  Float?
-  User          User     @relation(fields: [userId], references: [id])
-  Wallet        Wallet   @relation(fields: [walletAddress], references: [address])
+  user           User             @relation(fields: [userId], references: [id])
+  userId         BigInt
+  wallet         Wallet           @relation(fields: [walletAddress], references: [address])
+  walletAddress  String
+  label          String?
+  tags           String[]         @default([]) // Array of tags: "whale", "degen", "smart-money", etc.
+  paused         Boolean          @default(false)
+  minTradeSize   Float?           // per-wallet override; null = use global user setting
 
-  @@id([userId, walletAddress])
+  @@id([userId, walletAddress]) // Composite primary key
 }
