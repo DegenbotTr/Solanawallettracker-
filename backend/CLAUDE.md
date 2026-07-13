@@ -4,25 +4,6 @@
 
 ---
 
-
-## Git Rules — IMPORTANT
-
-### Pushing
-- NEVER run `git push`, `git push --force`, or any push variant under any circumstances.
-- Do not push even if explicitly asked, unless the user says the exact phrase "confirm push".
-- If a task seems to require pushing (e.g. "deploy this", "publish this branch"), stop and ask the user to run the push command themselves.
-
-### Committing
-- You may run `git add`, `git commit`, `git status`, `git diff`, `git log`, and create local branches.
-- Do NOT add a "Co-Authored-By: Claude" trailer or any Claude/Anthropic attribution to commit messages.
-- Do NOT mention Claude, Claude Code, or AI assistance in commit messages.
-- Write commit messages as if authored solely by the repository owner.
-- Always use the existing configured git user.name and user.email for this repo — do not change or override git config.
-- If no git identity is configured, ask the user before committing.
-
-### Not allowed
-- No merging, rebasing onto remote, or opening pull requests automatically.
-
 ## Project Overview
 
 **Sol Wallet Watcher** is a Telegram bot that monitors Solana wallets in real‑time and sends instant buy/sell alerts to users. It is built with **NestJS** and uses **Telegraf** for the Telegram integration and **@solana/web3.js** with the **Helius** RPC/WebSocket API for on‑chain monitoring.

@@ -1,7 +1,44 @@
-# env - never commit this
+# Environment files - never commit these
 .env
+.env.local
+.env.production.local
+.env.development.local
 
-# dependencies
+# Dependencies
 node_modules/
+.pnp
+.pnp.js
 
+# Build outputs
+dist/
+.next/
+out/
+build/
+
+# Prisma
 /generated/prisma
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Testing
+coverage/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Turbopack
+.turbo/
