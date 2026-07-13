@@ -249,7 +249,7 @@ export class BotUpdate {
         `/trending /leaderboard\n\n` +
         `<b>Settings</b>\n` +
         `/minsize /stats /menu\n\n` +
-        `💡 Paste any Solana token CA to get a full info card.`,
+        `💡 Paste any Solana token CA — or type <code>$SYMBOL</code> (e.g. <code>$BONK</code>) — to get a full info card.`,
       { parse_mode: 'HTML' },
     );
   }
@@ -674,7 +674,7 @@ export class BotUpdate {
     }
     pendingAction.set(ctx.chat.id, 'price');
     await ctx.reply(
-      `� <b>Token Price</b>\n\nPaste a token mint address or symbol:`,
+      `💲 <b>Token Price</b>\n\nPaste a token mint or type a symbol like <code>$BONK</code>:`,
       { parse_mode: 'HTML' },
     );
   }
@@ -761,7 +761,7 @@ export class BotUpdate {
     await ctx.answerCbQuery();
     pendingAction.set(ctx.chat.id, 'price');
     await ctx.reply(
-      `💲 <b>Token Price</b>\n\nPaste a token mint address or symbol:`,
+      `💲 <b>Token Price</b>\n\nPaste a token mint or type a symbol like <code>$BONK</code>:`,
       { parse_mode: 'HTML' },
     );
   }
@@ -803,7 +803,7 @@ export class BotUpdate {
         `/trending /leaderboard\n\n` +
         `<b>Settings</b>\n` +
         `/minsize /stats /menu\n\n` +
-        `💡 Paste any Solana token CA to get a full info card.`,
+        `💡 Paste any Solana token CA — or type <code>$SYMBOL</code> (e.g. <code>$BONK</code>) — to get a full info card.`,
       { parse_mode: 'HTML' },
     );
   }
@@ -1005,13 +1005,18 @@ export class BotUpdate {
 
     const action = pendingAction.get(chatId);
     if (!action) {
-      // Auto-detect pasted Solana address (base58, 32-44 chars, no spaces)
       const trimmed = text.trim();
+      // Auto-detect pasted Solana address (base58, 32-44 chars, no spaces)
       if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
         // Skip if it's a watched wallet address — not a token
         const watched = await this.solanaService.getWatchedWallets(chatId);
         if (watched.some((w) => w.address === trimmed)) return;
         await this.showTokenInfo(ctx, trimmed);
+        return;
+      }
+      // Auto-detect $SYMBOL — resolve to a mint via DexScreener search.
+      if (/^\$[A-Za-z0-9]{2,15}$/.test(trimmed)) {
+        await this.showTokenInfoBySymbol(ctx, trimmed);
         return;
       }
       return;
@@ -1288,7 +1293,24 @@ export class BotUpdate {
   private async showPrice(ctx: Context, mintOrSymbol: string): Promise<void> {
     const loading = await ctx.reply('⏳ Fetching price...');
     try {
-      const result = await this.solanaService.getTokenPrice(mintOrSymbol);
+      let mint = mintOrSymbol.trim();
+      // Resolve $SYMBOL / short symbol to a mint before hitting the price API.
+      const isMint = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint);
+      if (!isMint) {
+        const resolved = await this.solanaService.resolveSymbol(mint);
+        if (!resolved) {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            (loading as any).message_id,
+            undefined,
+            `❌ Couldn't find <code>${mintOrSymbol}</code> on Solana. Paste the CA if you know it.`,
+            { parse_mode: 'HTML' },
+          );
+          return;
+        }
+        mint = resolved.mint;
+      }
+      const result = await this.solanaService.getTokenPrice(mint);
       await ctx.telegram.editMessageText(
         ctx.chat.id,
         (loading as any).message_id,
@@ -1325,6 +1347,56 @@ export class BotUpdate {
     );
   }
 
+  /**
+   * Resolve a $SYMBOL to a mint via DexScreener and route to the token card.
+   * Prepends a note when the symbol matched multiple Solana tokens so the
+   * user knows we picked the most-liquid one and can pass the CA directly
+   * if we picked wrong.
+   */
+  private async showTokenInfoBySymbol(
+    ctx: Context,
+    input: string,
+  ): Promise<void> {
+    const replyToId = (ctx.message as any)?.message_id;
+    const loading = await ctx.reply(`🔎 Looking up ${input}...`);
+    try {
+      const resolved = await this.solanaService.resolveSymbol(input);
+      if (!resolved) {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          (loading as any).message_id,
+          undefined,
+          `❌ Couldn't find <b>${input}</b> on Solana.\n\nPaste the full CA if you know it.`,
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+      await ctx.telegram
+        .deleteMessage(ctx.chat.id, (loading as any).message_id)
+        .catch(() => {});
+      if (resolved.ambiguous) {
+        await ctx.reply(
+          `⚠️ Multiple <b>$${resolved.symbol}</b> tokens exist on Solana. Showing the most liquid one — if this isn't the one you meant, paste the CA directly.`,
+          {
+            parse_mode: 'HTML',
+            reply_parameters: { message_id: replyToId },
+          } as any,
+        );
+      }
+      await this.showTokenInfo(ctx, resolved.mint);
+    } catch {
+      await ctx.telegram
+        .editMessageText(
+          ctx.chat.id,
+          (loading as any).message_id,
+          undefined,
+          `❌ Could not resolve ${input}. Try pasting the CA.`,
+          { parse_mode: 'HTML' },
+        )
+        .catch(() => {});
+    }
+  }
+
   private async showTokenInfo(ctx: Context, mint: string): Promise<void> {
     const replyToId = (ctx.message as any)?.message_id;
     const loading = await ctx.reply('🔍 Fetching token info...');
@@ -1338,25 +1410,41 @@ export class BotUpdate {
         .deleteMessage(ctx.chat.id, (loading as any).message_id)
         .catch(() => {});
 
-      // Look up the first caller BEFORE we record the current call, so if this
-      // user was the first, they don't see themselves as the "first caller".
+      // Look up the truly earliest call BEFORE we record the current one.
+      // If the earliest call was legacy (no callerId), we show "First seen"
+      // without a handle rather than falsely crediting the next caller.
+      // Always shown — even when the current user IS the first caller —
+      // because seeing "you first called this at $5k, now $10k (+100%)" is
+      // exactly the kind of self-tracking degens want.
       let firstCallerNote = '';
       if (isGroup(ctx)) {
         const first = await this.solanaService
           .getFirstCaller(ctx.chat.id, mint)
           .catch(() => null);
-        if (first && first.mcAtCall > 0) {
-          const gainPct =
-            ((marketCap - first.mcAtCall) / first.mcAtCall) * 100;
-          const gainEmoji = gainPct >= 0 ? '🟢' : '🔴';
-          const gainSign = gainPct >= 0 ? '+' : '';
-          const handle = first.callerUsername
-            ? `@${first.callerUsername}`
-            : `user ${first.callerId}`;
+        if (first) {
+          const hasCaller = first.callerId > 0;
+          const isSelf = hasCaller && first.callerId === (ctx.from?.id ?? 0);
+          const label = hasCaller ? 'First called by' : 'First seen';
+          const handle = isSelf
+            ? '<b>you</b>'
+            : first.callerUsername
+              ? `@${first.callerUsername}`
+              : hasCaller
+                ? `user ${first.callerId}`
+                : '<i>unknown caller</i>';
           const timeAgo = this.humanTimeAgo(first.calledAt);
+          const detailLine =
+            first.mcAtCall > 0 && marketCap > 0
+              ? (() => {
+                  const gainPct =
+                    ((marketCap - first.mcAtCall) / first.mcAtCall) * 100;
+                  const gainEmoji = gainPct >= 0 ? '🟢' : '🔴';
+                  const gainSign = gainPct >= 0 ? '+' : '';
+                  return `└ MC then: <b>${this.fmtCompactUsd(first.mcAtCall)}</b>  ·  now <b>${this.fmtCompactUsd(marketCap)}</b>  ·  ${gainEmoji} <b>${gainSign}${gainPct.toFixed(1)}%</b>  ·  <i>${timeAgo}</i>`;
+                })()
+              : `└ <i>${timeAgo}</i>`;
           firstCallerNote =
-            `🎯 <b>First called by ${handle}</b>\n` +
-            `└ MC then: <b>${this.fmtCompactUsd(first.mcAtCall)}</b>  ·  ${gainEmoji} <b>${gainSign}${gainPct.toFixed(1)}%</b> since  ·  <i>${timeAgo}</i>\n\n`;
+            `🎯 <b>${label} ${handle}</b>\n` + detailLine + '\n\n';
         }
 
         this.solanaService

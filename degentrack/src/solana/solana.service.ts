@@ -962,8 +962,10 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Returns the first user who ever called this mint in this group, if any.
-   * Skips synthetic pre-migration rows (callerId = 0).
+   * Returns the truly earliest call for this mint in this group, regardless
+   * of whether the caller was recorded. Consumer must handle callerId=0 as
+   * "unknown caller" (legacy pre-Phase-1 rows). Fixes a bug where filtering
+   * out callerId=0 meant a later real-user call could be misreported as first.
    */
   async getFirstCaller(
     groupId: number,
@@ -976,7 +978,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     calledAt: Date;
   } | null> {
     const first = await this.prisma.groupTokenCall.findFirst({
-      where: { groupId, mint, callerId: { not: BigInt(0) } },
+      where: { groupId, mint },
       orderBy: { calledAt: 'asc' },
       select: {
         callerId: true,
@@ -1039,9 +1041,10 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       winRate: number; // fraction of calls with >= 100% peak gain (2x+)
     }[]
   > {
-    // Fetch all calls with a real caller in this group.
+    // Fetch ALL calls (including anonymous pre-Phase-1 rows) so we can tell
+    // whether the truly earliest call for each mint was anonymous.
     const rows = await this.prisma.groupTokenCall.findMany({
-      where: { groupId, callerId: { not: BigInt(0) } },
+      where: { groupId },
       orderBy: { calledAt: 'asc' },
       select: {
         callerId: true,
@@ -1052,19 +1055,35 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     });
     if (rows.length === 0) return [];
 
-    // Deduplicate to first-caller per mint (discovery calls).
+    // For each mint, look at its truly-earliest call:
+    // - Skip mints whose first call was anonymous (callerId=0) — we can't
+    //   credit a later caller who didn't discover it.
+    // - Skip mints without a recorded mcAtCall (can't score).
     const firstPerMint = new Map<
       string,
       { callerId: bigint; username: string; mcAtCall: number }
     >();
     for (const r of rows) {
-      if (r.mcAtCall <= 0) continue;
       if (firstPerMint.has(r.mint)) continue;
+      if (r.callerId === BigInt(0)) {
+        // Mark as "poisoned" — later calls for this mint should be skipped too.
+        firstPerMint.set(r.mint, {
+          callerId: BigInt(0),
+          username: '',
+          mcAtCall: 0,
+        });
+        continue;
+      }
+      if (r.mcAtCall <= 0) continue;
       firstPerMint.set(r.mint, {
         callerId: r.callerId,
         username: r.callerUsername,
         mcAtCall: r.mcAtCall,
       });
+    }
+    // Drop poisoned entries.
+    for (const [mint, v] of firstPerMint) {
+      if (v.callerId === BigInt(0)) firstPerMint.delete(mint);
     }
     if (firstPerMint.size === 0) return [];
 
@@ -2442,6 +2461,54 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       tradeCount: trades.length,
       priceableTradeCount,
     };
+  }
+
+  /**
+   * Resolve a token symbol (e.g. "PUMP", "$BONK") to its most-liquid Solana
+   * mint via DexScreener search. Case-insensitive. Returns null if nothing
+   * matches. When multiple tokens share a symbol we pick the pair with the
+   * highest liquidity.
+   */
+  async resolveSymbol(input: string): Promise<{
+    mint: string;
+    symbol: string;
+    name: string;
+    liquidityUsd: number;
+    ambiguous: boolean; // true when other Solana pairs share this symbol
+  } | null> {
+    const q = input.trim().replace(/^\$/, '');
+    if (!/^[A-Za-z0-9]{2,15}$/.test(q)) return null;
+    try {
+      const r = await fetch(
+        `https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(q)}`,
+      );
+      const d = await r.json();
+      const pairs: any[] = d?.pairs ?? [];
+      const solPairs = pairs.filter(
+        (p) =>
+          p?.chainId === 'solana' &&
+          typeof p?.baseToken?.symbol === 'string' &&
+          p.baseToken.symbol.toLowerCase() === q.toLowerCase(),
+      );
+      if (solPairs.length === 0) return null;
+      solPairs.sort(
+        (a, b) => (b?.liquidity?.usd ?? 0) - (a?.liquidity?.usd ?? 0),
+      );
+      const top = solPairs[0];
+      // Distinct mints matching the symbol — signals ambiguity.
+      const distinctMints = new Set(
+        solPairs.map((p) => p.baseToken?.address).filter(Boolean),
+      );
+      return {
+        mint: top.baseToken.address,
+        symbol: top.baseToken.symbol,
+        name: top.baseToken.name ?? '',
+        liquidityUsd: top?.liquidity?.usd ?? 0,
+        ambiguous: distinctMints.size > 1,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**
