@@ -1,6 +1,9 @@
 {
   "name": "backend",
   "version": "1.0.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "build": "prisma generate && nest build",
     "start": "nest start",
