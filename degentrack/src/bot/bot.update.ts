@@ -1423,15 +1423,12 @@ export class BotUpdate {
           .catch(() => null);
         if (first) {
           const hasCaller = first.callerId > 0;
-          const isSelf = hasCaller && first.callerId === (ctx.from?.id ?? 0);
           const label = hasCaller ? 'First called by' : 'First seen';
-          const handle = isSelf
-            ? '<b>you</b>'
-            : first.callerUsername
-              ? `@${first.callerUsername}`
-              : hasCaller
-                ? `user ${first.callerId}`
-                : '<i>unknown caller</i>';
+          const handle = first.callerUsername
+            ? `@${first.callerUsername}`
+            : hasCaller
+              ? `user ${first.callerId}`
+              : '<i>unknown caller</i>';
           const timeAgo = this.humanTimeAgo(first.calledAt);
           const detailLine =
             first.mcAtCall > 0 && marketCap > 0
