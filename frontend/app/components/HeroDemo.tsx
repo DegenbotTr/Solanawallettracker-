@@ -101,14 +101,16 @@ export function HeroDemo() {
   return (
     <div className="relative overflow-hidden rounded-2xl border border-border bg-panel/80 p-1 shadow-2xl backdrop-blur">
       <div className="rounded-xl border border-border/70 bg-black/60 p-5">
-        <div className="flex items-center justify-between gap-2 border-b border-border/60 pb-3">
-          <div className="flex items-center gap-2">
-            <div className="flex gap-1.5">
+        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 border-b border-border/60 pb-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="flex shrink-0 gap-1.5">
               <span className="h-2.5 w-2.5 rounded-full bg-red-500/70" />
               <span className="h-2.5 w-2.5 rounded-full bg-yellow-500/70" />
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-500/70" />
             </div>
-            <span className="ml-3 text-xs text-muted">{scene.header}</span>
+            <span className="ml-3 truncate text-xs text-muted">
+              {scene.header}
+            </span>
           </div>
           <div className="flex gap-1">
             {scenes.map((s, i) => (
@@ -116,7 +118,7 @@ export function HeroDemo() {
                 key={s.id}
                 type="button"
                 onClick={() => setActive(i)}
-                className={`rounded-full border px-2.5 py-1 text-[10px] font-medium transition-colors ${
+                className={`whitespace-nowrap rounded-full border px-2.5 py-1 text-[10px] font-medium transition-colors ${
                   i === active
                     ? "border-accent-2/50 bg-accent-2/15 text-white"
                     : "border-border bg-transparent text-muted hover:text-white"

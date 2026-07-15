@@ -90,7 +90,9 @@ export function ScrambleText({
           <span
             key={i}
             className={c.done ? undefined : "scramble-pending"}
-            style={{ whiteSpace: "pre" }}
+            // pre-wrap (not pre): spaces must stay soft-wrap points or the
+            // headline can't break into lines on small screens.
+            style={{ whiteSpace: "pre-wrap" }}
           >
             {c.ch}
           </span>

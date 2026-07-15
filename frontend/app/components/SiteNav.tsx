@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { BrandMark } from "./BrandMark";
+import { MobileMenu } from "./MobileMenu";
 
 const COMMUNITY_URL = "https://t.me/Degenhubtrade";
 
@@ -12,7 +13,7 @@ export function SiteNav() {
           <span className="text-sm font-semibold tracking-tight text-white">
             DegenHub
           </span>
-          <span className="hidden items-center gap-1.5 rounded-full border border-accent-2/40 bg-panel px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider sm:inline-flex">
+          <span className="hidden items-center gap-1.5 whitespace-nowrap rounded-full border border-accent-2/40 bg-panel px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider lg:inline-flex">
             <span className="pulse-dot h-1.5 w-1.5 rounded-full bg-accent" />
             <span className="badge-shimmer">Home for Traders Bots</span>
           </span>
@@ -30,7 +31,7 @@ export function SiteNav() {
             href={COMMUNITY_URL}
             target="_blank"
             rel="noreferrer"
-            className="hidden items-center gap-1.5 rounded-full border border-border bg-panel px-4 py-2 text-xs font-medium text-white transition-colors hover:border-accent-2/40 hover:bg-panel-2 sm:inline-flex"
+            className="hidden items-center gap-1.5 whitespace-nowrap rounded-full border border-border bg-panel px-4 py-2 text-xs font-medium text-white transition-colors hover:border-accent-2/40 hover:bg-panel-2 lg:inline-flex"
           >
             <TelegramIcon className="h-3.5 w-3.5 text-accent-2" />
             Community
@@ -39,7 +40,7 @@ export function SiteNav() {
             href="https://t.me/De1trackBot"
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-zinc-200"
+            className="hidden items-center gap-1.5 whitespace-nowrap rounded-full bg-white px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-zinc-200 sm:inline-flex"
           >
             Launch bot
             <svg
@@ -54,6 +55,7 @@ export function SiteNav() {
               <path d="M7 17L17 7M9 7h8v8" />
             </svg>
           </a>
+          <MobileMenu />
         </div>
       </div>
     </header>
@@ -78,7 +80,7 @@ function NavLink({
   return (
     <Link
       href={href}
-      className="rounded-full px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-panel hover:text-white"
+      className="whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-panel hover:text-white"
     >
       {children}
     </Link>
