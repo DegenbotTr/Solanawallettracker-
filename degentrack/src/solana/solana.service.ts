@@ -563,6 +563,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       bullxId: string; // also used as the GoPlus chain id
       gecko: string; // GeckoTerminal network slug (token images)
       moralis: string; // Moralis chain slug (EVM data fallback)
+      dot: string; // big-dot emoji for the chain line under the token name
+      scanName: string; // explorer display name ("BscScan" etc.)
       gmgn?: string;
       honeypot?: string;
     }
@@ -574,6 +576,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       bullxId: '1',
       gecko: 'eth',
       moralis: 'eth',
+      dot: '⚪',
+      scanName: 'Etherscan',
       gmgn: 'eth',
       honeypot: 'ethereum',
     },
@@ -584,6 +588,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       bullxId: '56',
       gecko: 'bsc',
       moralis: 'bsc',
+      dot: '🟡',
+      scanName: 'BscScan',
       gmgn: 'bsc',
       honeypot: 'bsc',
     },
@@ -594,6 +600,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       bullxId: '8453',
       gecko: 'base',
       moralis: 'base',
+      dot: '🔵',
+      scanName: 'BaseScan',
       gmgn: 'base',
       honeypot: 'base',
     },
@@ -604,6 +612,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       bullxId: '42161',
       gecko: 'arbitrum',
       moralis: 'arbitrum',
+      dot: '🔷',
+      scanName: 'Arbiscan',
     },
   };
 
@@ -1079,6 +1089,19 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         signature,
         walletAddress,
       );
+
+    // Unknown EVM chain (DexScreener indexes it, but we have no per-chain
+    // bot/explorer links) — generic chart button only, never Solana buttons.
+    if (chain !== 'solana') {
+      return [
+        [
+          {
+            text: '📊 Chart',
+            url: `https://dexscreener.com/${chain}/${mint}`,
+          },
+        ],
+      ];
+    }
 
     const trojanRef = this.config.get<string>('TROJAN_REF', '');
     const bullxRef = this.config.get<string>('BULLX_REF', '');
@@ -1889,15 +1912,17 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
     // Pick the most liquid pair.
     // - Solana: keep the original behavior (most-liquid of all returned pairs).
-    // - EVM: strictly match the requested contract as the pair's base token AND
-    //   a supported chain. DexScreener returns unrelated pairs for bogus/zero
-    //   addresses, so without this a junk 0x… could render a wrong-token card.
+    // - EVM: strictly match the requested contract as the pair's base token
+    //   (DexScreener returns unrelated pairs for bogus/zero addresses, so
+    //   without this a junk 0x… could render a wrong-token card) — but accept
+    //   ANY chain DexScreener indexes. New degen chains (robinhood, sonic, …)
+    //   appear constantly; unknown ones just get generic links instead of the
+    //   per-chain bot/security buttons.
     const allPairs: any[] = ds?.pairs ?? [];
     const wanted = this.normalizeAddress(mint);
     const candidatePairs = isEvm
       ? allPairs.filter(
           (p: any) =>
-            !!SolanaService.EVM_CHAINS[p?.chainId ?? ''] &&
             this.normalizeAddress(p?.baseToken?.address ?? '') === wanted,
         )
       : allPairs;
@@ -2067,10 +2092,31 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
     const socialsLine = `\n🔗 <b>Socials</b>\n└ ${socialParts.join(' • ')}`;
 
-    const chainBadge = evmMeta ? evmMeta.badge : '◎ Solana';
+    // Chain identity line under the name: big dot + chain + its explorer.
+    // Unknown EVM chains (not in EVM_CHAINS) get a generic dot + a DexScreener
+    // link since we don't know their explorer.
+    const chainDisplayName = evmMeta
+      ? evmMeta.name
+      : isEvm
+        ? chain.charAt(0).toUpperCase() + chain.slice(1)
+        : 'Solana';
+    const chainDot = evmMeta?.dot ?? (isEvm ? '🔘' : '🟣');
+    const scanLink = evmMeta
+      ? `<a href="${evmMeta.explorer}/token/${mint}">${evmMeta.scanName}</a>`
+      : isEvm
+        ? `<a href="https://dexscreener.com/${chain}/${mint}">DexScreener</a>`
+        : `<a href="https://solscan.io/token/${mint}">Solscan</a>`;
+    const chainLine = `${chainDot} <b>${chainDisplayName}</b> · ${scanLink}\n`;
+
+    const chainBadge = evmMeta
+      ? evmMeta.badge
+      : isEvm
+        ? `${chainDot} ${chainDisplayName}`
+        : '◎ Solana';
 
     const text =
       `🪙 <b>${name}</b> (<b>$${symbol}</b>)\n` +
+      chainLine +
       `<code>${mint}</code>\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `📊 <b>Stats</b>\n` +
