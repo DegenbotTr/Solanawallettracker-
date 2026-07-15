@@ -46,6 +46,14 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
   private static readonly INSIDER_WINDOW_SEC = 60;
   private static readonly INSIDER_MIN_WALLETS = 3;
 
+  // EVM wallet watching — Moralis has no free WebSocket like Helius, so we
+  // poll the swaps endpoint for watched 0x wallets on an interval.
+  private evmPollTimer: NodeJS.Timeout | null = null;
+  private evmPollBusy = false;
+  private evmSeenTxs = new Map<string, Set<string>>(); // wallet → recent tx hashes
+  private evmLastPollAt = new Map<string, string>(); // `${wallet}:${chain}` → ISO date
+  private static readonly EVM_SEEN_CAP = 200;
+
   constructor(
     private config: ConfigService,
     private prisma: PrismaService,
@@ -67,12 +75,19 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       include: { watchers: true },
     });
 
+    let hasEvmWallets = false;
     for (const w of allWatched) {
       if (w.watchers.length > 0) {
+        // EVM wallets have no Helius WebSocket — the Moralis poller covers them.
+        if (this.isEvmAddress(w.address)) {
+          hasEvmWallets = true;
+          continue;
+        }
         // null chatId because we just want to start the WebSocket, chatIds are in DB
         await this.initWalletSubscription(w.address);
       }
     }
+    if (hasEvmWallets) this.ensureEvmPolling();
 
     const envWallets = this.config.get<string>('WATCHED_WALLETS', '');
     if (envWallets) {
@@ -105,6 +120,10 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     if (this.peakPollTimer) {
       clearInterval(this.peakPollTimer);
       this.peakPollTimer = null;
+    }
+    if (this.evmPollTimer) {
+      clearInterval(this.evmPollTimer);
+      this.evmPollTimer = null;
     }
   }
 
@@ -218,10 +237,20 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
   }
 
   async watchWallet(address: string, chatId: number | null): Promise<boolean> {
-    try {
-      new PublicKey(address);
-    } catch {
-      return false;
+    // EVM wallets are stored lowercase; Solana passes through unchanged.
+    address = this.normalizeAddress(address);
+    const isEvm = this.isEvmAddress(address);
+
+    if (isEvm) {
+      // EVM watching runs on Moralis polling — without a key we can't deliver
+      // alerts, so refuse the watch rather than silently doing nothing.
+      if (!this.config.get<string>('MORALIS_API_KEY', '')) return false;
+    } else {
+      try {
+        new PublicKey(address);
+      } catch {
+        return false;
+      }
     }
 
     // 1. Ensure wallet exists in DB
@@ -249,12 +278,18 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       });
     }
 
-    // 3. Ensure WebSocket listener is active
-    await this.initWalletSubscription(address);
+    // 3. Ensure the live feed is active — Helius WebSocket for Solana,
+    // Moralis polling loop for EVM.
+    if (isEvm) {
+      this.ensureEvmPolling();
+    } else {
+      await this.initWalletSubscription(address);
+    }
     return true;
   }
 
   async unwatchWallet(address: string, chatId: number): Promise<boolean> {
+    address = this.normalizeAddress(address);
     try {
       // Remove the join record
       await this.prisma.watchedWallet.delete({
@@ -269,10 +304,14 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       });
 
       if (otherWatchers === 0) {
-        const entry = this.watchedWallets.get(address);
-        if (entry) {
-          this.connection.removeOnLogsListener(entry.subId).catch(() => {});
-          this.watchedWallets.delete(address);
+        if (this.isEvmAddress(address)) {
+          this.evmSeenTxs.delete(address);
+        } else {
+          const entry = this.watchedWallets.get(address);
+          if (entry) {
+            this.connection.removeOnLogsListener(entry.subId).catch(() => {});
+            this.watchedWallets.delete(address);
+          }
         }
       }
       return true;
@@ -458,24 +497,55 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     return 'unknown';
   }
 
+  /**
+   * Guard for SOLANA-ONLY features (portfolio, PnL, TX history, backfill).
+   * EVM wallets get a pointer to what DOES work for them instead of a flat
+   * rejection.
+   */
   chainErrorMessage(address: string): string | null {
     const chain = this.detectChain(address);
     if (chain === 'solana') return null; // valid, no error
 
+    if (chain === 'ethereum') {
+      return (
+        `⚠️ <b>This feature is Solana-only</b>\n\n` +
+        `For EVM wallets (ETH · BSC · Base · Arbitrum) you can:\n` +
+        `• <code>/watch 0x…</code> — real-time buy/sell alerts\n` +
+        `• Paste a token CA for a full info card\n\n` +
+        `Portfolio, PnL and TX history are Solana wallets only for now.`
+      );
+    }
+
     const chainNames: Record<string, string> = {
-      ethereum: '⟠ Ethereum / EVM (MetaMask address)',
       bitcoin: '₿ Bitcoin',
       tron: '🔺 Tron',
     };
-
     const detected = chainNames[chain] ?? '❓ Unknown chain';
     return (
-      `⛔ <b>That's not a Solana wallet</b>\n\n` +
+      `⛔ <b>Unsupported address</b>\n\n` +
       `Detected: <b>${detected}</b>\n\n` +
-      `Real-time <b>wallet tracking</b> is Solana-only for now.\n` +
-      `(EVM token info cards work — just paste an <code>0x…</code> contract in a group.)\n\n` +
+      `This bot supports <b>Solana</b> wallets and <b>EVM</b> wallets ` +
+      `(ETH · BSC · Base · Arbitrum).\n\n` +
       `Solana addresses look like:\n<code>EizqmoCSovbTzuSnmxkdaJwLBBZgyB2GyjN3m3uJWXpZ</code>`
     );
+  }
+
+  /**
+   * Guard for the WATCH flow — Solana always allowed; EVM allowed when the
+   * Moralis key is configured (polling can't deliver alerts without it).
+   */
+  watchChainErrorMessage(address: string): string | null {
+    const chain = this.detectChain(address);
+    if (chain === 'solana') return null;
+    if (chain === 'ethereum') {
+      if (this.config.get<string>('MORALIS_API_KEY', '')) return null;
+      return (
+        `⚠️ <b>EVM wallet tracking isn't enabled</b>\n\n` +
+        `The bot owner needs to set <code>MORALIS_API_KEY</code> to enable ` +
+        `ETH/BSC wallet alerts. Solana wallets work as usual.`
+      );
+    }
+    return this.chainErrorMessage(address);
   }
 
   // ─── EVM Multi-Chain Support (token info cards only) ─────────────────────────
@@ -701,6 +771,233 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  // ─── EVM Wallet Watching (Moralis polling) ───────────────────────────────────
+  //
+  // Helius gives Solana a free WebSocket; Moralis has no free equivalent, so
+  // EVM wallets are polled: every EVM_POLL_SECONDS we pull decoded swaps for
+  // each watched 0x wallet on each chain in EVM_WATCH_CHAINS and alert on new
+  // ones. Same per-user filters as Solana alerts (paused, min trade size).
+
+  private ensureEvmPolling(): void {
+    if (this.evmPollTimer) return;
+    if (!this.config.get<string>('MORALIS_API_KEY', '')) return;
+    const secs =
+      parseInt(this.config.get<string>('EVM_POLL_SECONDS', '180'), 10) || 180;
+    this.evmPollTimer = setInterval(() => {
+      this.pollEvmWallets().catch((err) =>
+        this.logger.error(`EVM wallet poll failed: ${err.message}`),
+      );
+    }, secs * 1000);
+    this.logger.log(`EVM wallet polling started (every ${secs}s)`);
+  }
+
+  /** Chains to poll, as Moralis slugs. Default covers where memes trade. */
+  private evmWatchChains(): { key: string; moralis: string }[] {
+    const raw = this.config.get<string>('EVM_WATCH_CHAINS', 'bsc,eth');
+    const out: { key: string; moralis: string }[] = [];
+    for (const slug of raw.split(',').map((s) => s.trim().toLowerCase())) {
+      const entry = Object.entries(SolanaService.EVM_CHAINS).find(
+        ([, m]) => m.moralis === slug,
+      );
+      if (entry) out.push({ key: entry[0], moralis: slug });
+    }
+    return out;
+  }
+
+  private async pollEvmWallets(): Promise<void> {
+    if (this.evmPollBusy) return; // a slow previous run is still going
+    this.evmPollBusy = true;
+    try {
+      const rows = await this.prisma.watchedWallet.findMany({
+        where: { walletAddress: { startsWith: '0x' } },
+        include: { user: true },
+      });
+      if (rows.length === 0) {
+        // Nobody watches EVM wallets anymore — stop burning Moralis CU.
+        if (this.evmPollTimer) {
+          clearInterval(this.evmPollTimer);
+          this.evmPollTimer = null;
+          this.logger.log('EVM wallet polling stopped (no watched wallets)');
+        }
+        return;
+      }
+
+      const byWallet = new Map<string, typeof rows>();
+      for (const r of rows) {
+        const list = byWallet.get(r.walletAddress) ?? [];
+        list.push(r);
+        byWallet.set(r.walletAddress, list);
+      }
+
+      const chains = this.evmWatchChains();
+      for (const [wallet, watchers] of byWallet) {
+        for (const { key, moralis } of chains) {
+          try {
+            await this.checkEvmWalletChain(wallet, key, moralis, watchers);
+          } catch (err) {
+            this.logger.warn(
+              `EVM poll ${wallet} on ${moralis} failed: ${(err as Error).message}`,
+            );
+          }
+        }
+      }
+    } finally {
+      this.evmPollBusy = false;
+    }
+  }
+
+  private async checkEvmWalletChain(
+    wallet: string,
+    chainKey: string,
+    moralisChain: string,
+    watchers: {
+      userId: bigint;
+      label: string | null;
+      paused: boolean;
+      minTradeSize: number | null;
+      user: { minTradeSize: number };
+    }[],
+  ): Promise<void> {
+    const key = this.config.get<string>('MORALIS_API_KEY', '');
+    if (!key) return;
+    const pollKey = `${wallet}:${moralisChain}`;
+    // First poll for a wallet starts "now" — we alert on NEW swaps only, not
+    // history. A 90s overlap covers block/indexing lag; dedupe absorbs it.
+    const fromDate =
+      this.evmLastPollAt.get(pollKey) ??
+      new Date(Date.now() - 90_000).toISOString();
+    this.evmLastPollAt.set(
+      pollKey,
+      new Date(Date.now() - 90_000).toISOString(),
+    );
+
+    const r = await fetch(
+      `https://deep-index.moralis.io/api/v2.2/wallets/${wallet}/swaps` +
+        `?chain=${moralisChain}&order=DESC&limit=25&fromDate=${encodeURIComponent(fromDate)}`,
+      { headers: { accept: 'application/json', 'X-API-Key': key } },
+    );
+    if (!r.ok) return;
+    const data = await r.json();
+    const swaps: any[] = Array.isArray(data?.result) ? data.result : [];
+    if (swaps.length === 0) return;
+
+    let seen = this.evmSeenTxs.get(wallet);
+    if (!seen) {
+      seen = new Set<string>();
+      this.evmSeenTxs.set(wallet, seen);
+    }
+
+    // Oldest first so multi-swap bursts arrive in order.
+    for (const swap of swaps.reverse()) {
+      const hash: string = swap?.transactionHash ?? '';
+      if (!hash || seen.has(hash)) continue;
+      seen.add(hash);
+      if (seen.size > SolanaService.EVM_SEEN_CAP) {
+        const oldest = seen.values().next().value;
+        if (oldest) seen.delete(oldest);
+      }
+
+      const type = String(swap?.transactionType ?? '').toLowerCase();
+      if (type !== 'buy' && type !== 'sell') continue;
+      const usd = Math.abs(Number(swap?.totalValueUsd ?? 0));
+
+      for (const w of watchers) {
+        if (w.paused) continue;
+        const min = w.minTradeSize ?? w.user.minTradeSize;
+        if (usd < min) continue;
+        const chatId = Number(w.userId);
+        const message = this.formatEvmTradeMessage(
+          wallet,
+          chainKey,
+          swap,
+          w.label ?? '',
+        );
+        const tokenAddr: string = this.normalizeAddress(
+          (type === 'buy' ? swap?.bought?.address : swap?.sold?.address) ?? '',
+        );
+        this.bot.telegram
+          .sendMessage(chatId, message, {
+            parse_mode: 'HTML',
+            // @ts-ignore
+            disable_web_page_preview: true,
+            reply_markup: {
+              inline_keyboard: this.buildTradeButtons(
+                tokenAddr || null,
+                hash,
+                wallet,
+                chainKey,
+              ),
+            },
+          })
+          .catch((err) => {
+            this.logger.error(
+              `Failed to send EVM alert to ${chatId}: ${err.message}`,
+            );
+          });
+      }
+    }
+  }
+
+  private formatEvmTradeMessage(
+    wallet: string,
+    chainKey: string,
+    swap: any,
+    label: string,
+  ): string {
+    const meta = SolanaService.EVM_CHAINS[chainKey];
+    const badge = meta?.badge ?? chainKey;
+    const type = String(swap?.transactionType ?? '').toLowerCase();
+    const isBuy = type === 'buy';
+    const bought = swap?.bought ?? {};
+    const sold = swap?.sold ?? {};
+    const usd = Math.abs(Number(swap?.totalValueUsd ?? 0));
+    const short = `${wallet.slice(0, 6)}...${wallet.slice(-4)}`;
+    const who = label ? `🏷 <b>${label}</b>` : `👛 <code>${short}</code>`;
+
+    const fmtAmt = (v: unknown) => {
+      const n = Math.abs(Number(v ?? 0));
+      if (n === 0) return '?';
+      if (n >= 1_000_000)
+        return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+      return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+    };
+    const token = isBuy ? bought : sold;
+    const counter = isBuy ? sold : bought;
+    const tokenSym = token?.symbol || '???';
+    const counterSym = counter?.symbol || '???';
+    const priceUsd = Number(token?.usdPrice ?? 0);
+    const priceStr =
+      priceUsd > 0
+        ? priceUsd < 0.000001
+          ? `$${priceUsd.toExponential(3)}`
+          : priceUsd < 0.01
+            ? `$${priceUsd.toFixed(8)}`
+            : `$${priceUsd.toFixed(4)}`
+        : '—';
+    const when = swap?.blockTimestamp
+      ? new Date(swap.blockTimestamp).toLocaleTimeString('en-GB', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          timeZone: 'UTC',
+        }) + ' UTC'
+      : '';
+
+    return (
+      `${isBuy ? '🟢 <b>BUY</b>' : '🔴 <b>SELL</b>'} on ${badge}\n` +
+      `${who}\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `🪙 <b>${tokenSym}</b>\n` +
+      `├ ${isBuy ? 'Bought' : 'Sold'}  <b>${fmtAmt(token?.amount)} ${tokenSym}</b>\n` +
+      `├ ${isBuy ? 'Spent' : 'For'}   <b>${fmtAmt(counter?.amount)} ${counterSym}</b>` +
+      (usd > 0 ? `  (~$${usd.toFixed(2)})` : '') +
+      `\n` +
+      `├ Price  <b>${priceStr}</b>\n` +
+      `└ DEX    <b>${swap?.exchangeName ?? '—'}</b>` +
+      (when ? `\n\n⏰ ${when}` : '')
+    );
+  }
+
   // ─── Cached SOL Price ────────────────────────────────────────────────────────
 
   /**
@@ -774,7 +1071,14 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     // EVM tokens (ETH / BSC / Base / Arbitrum) get their own bot + research set;
     // the Solana bots (Trojan/Photon) don't work cross-chain.
     const evm = SolanaService.EVM_CHAINS[chain];
-    if (evm) return this.buildEvmTradeButtons(mint, chain, evm);
+    if (evm)
+      return this.buildEvmTradeButtons(
+        mint,
+        chain,
+        evm,
+        signature,
+        walletAddress,
+      );
 
     const trojanRef = this.config.get<string>('TROJAN_REF', '');
     const bullxRef = this.config.get<string>('BULLX_REF', '');
@@ -822,6 +1126,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     mint: string,
     chain: string,
     evm: (typeof SolanaService.EVM_CHAINS)[string],
+    signature?: string,
+    walletAddress?: string,
   ): { text: string; url: string }[][] {
     const bullxRef = this.config.get<string>('BULLX_REF', '');
 
@@ -857,6 +1163,16 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       text: '🔎 Scan',
       url: `${evm.explorer}/token/${mint}`,
     });
+    if (signature)
+      researchRow.push({
+        text: '🔗 TX',
+        url: `${evm.explorer}/tx/${signature}`,
+      });
+    if (walletAddress)
+      researchRow.push({
+        text: '👛 Wallet',
+        url: `${evm.explorer}/address/${walletAddress}`,
+      });
 
     return [tradeRow, researchRow];
   }

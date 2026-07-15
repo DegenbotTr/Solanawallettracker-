@@ -204,14 +204,14 @@ export class BotUpdate {
       await ctx.reply(
         `👁 <b>Sol Wallet Watcher</b> is now active in this group!\n\n` +
           `<b>Wallet tracking</b>\n` +
-          `• <code>/watch &lt;address&gt;</code> — track a Solana wallet\n` +
+          `• <code>/watch &lt;address&gt;</code> — track a Solana or EVM (0x…) wallet\n` +
           `• <code>/unwatch &lt;address&gt;</code> — stop tracking\n` +
           `• <code>/list</code> — see all watched wallets\n\n` +
           `<b>Group alpha</b>\n` +
           `• Paste any CA — <b>Solana</b> or <b>EVM</b> (ETH · BSC · Base · Arbitrum) — I'll show token info and record who called it first\n` +
           `• <code>/trending</code> — most-called tokens in this group\n` +
           `• <code>/leaderboard</code> — top callers by call performance\n\n` +
-          `⚠️ Real-time wallet alerts are Solana-only for now.`,
+          `ℹ️ Solana alerts are instant; EVM alerts arrive within a few minutes. Portfolio/PnL are Solana-only.`,
         { parse_mode: 'HTML' },
       );
       return;
@@ -277,14 +277,15 @@ export class BotUpdate {
       return;
     }
     if (isGroup(ctx)) {
-      await ctx.reply(`👛 Usage: <code>/watch &lt;solana_address&gt;</code>`, {
-        parse_mode: 'HTML',
-      });
+      await ctx.reply(
+        `👛 Usage: <code>/watch &lt;wallet_address&gt;</code>\n<i>Solana or EVM (0x…) wallets supported.</i>`,
+        { parse_mode: 'HTML' },
+      );
       return;
     }
     pendingAction.set(ctx.chat.id, 'watch');
     await ctx.reply(
-      `👛 <b>Add Wallet</b>\n\nPaste the Solana wallet address you want to watch:`,
+      `👛 <b>Add Wallet</b>\n\nPaste the wallet address you want to watch — Solana or EVM (<code>0x…</code>):`,
       { parse_mode: 'HTML' },
     );
   }
@@ -995,6 +996,10 @@ export class BotUpdate {
       // Auto-detect pasted EVM contract (0x + 40 hex) — ETH / BSC / Base /
       // Arbitrum. The card resolves the actual chain live from DexScreener.
       if (this.solanaService.isEvmAddress(trimmed)) {
+        // Skip if it's a watched wallet address — not a token
+        const watched = await this.solanaService.getWatchedWallets(chatId);
+        const norm = this.solanaService.normalizeAddress(trimmed);
+        if (watched.some((w) => w.address === norm)) return;
         await this.showTokenInfo(ctx, trimmed);
         return;
       }
@@ -1025,7 +1030,7 @@ export class BotUpdate {
     else if (action === 'price') await this.showPrice(ctx, input);
     else if (action === 'minsize') await this.setMinSize(ctx, input);
     else if (action === 'label_address') {
-      const chainErr = this.solanaService.chainErrorMessage(input);
+      const chainErr = this.solanaService.watchChainErrorMessage(input);
       if (chainErr) {
         await ctx.reply(chainErr, { parse_mode: 'HTML' });
         return;
@@ -1102,29 +1107,41 @@ export class BotUpdate {
 
   private async addWallet(ctx: Context, address: string): Promise<void> {
     try {
-      const chainErr = this.solanaService.chainErrorMessage(address);
+      const chainErr = this.solanaService.watchChainErrorMessage(address);
       if (chainErr) {
         await ctx.reply(chainErr, { parse_mode: 'HTML' });
         return;
       }
+      const isEvm = this.solanaService.isEvmAddress(address);
+      if (isEvm) address = this.solanaService.normalizeAddress(address);
       const success = await this.solanaService.watchWallet(
         address,
         ctx.chat.id,
       );
       if (!success) {
-        await ctx.reply(
-          `❌ <b>Invalid address</b>\n\nNot a valid Solana wallet.`,
-          { parse_mode: 'HTML' },
-        );
+        await ctx.reply(`❌ <b>Invalid address</b>\n\nNot a valid wallet.`, {
+          parse_mode: 'HTML',
+        });
         return;
       }
       const short = `${address.slice(0, 6)}...${address.slice(-4)}`;
+      const evmNote = isEvm
+        ? `\n⛓ EVM wallet — swap alerts on <b>BSC & ETH</b> (checked every few minutes).`
+        : '';
       if (isGroup(ctx)) {
         await ctx.reply(
           `✅ <b>Wallet Added</b>\n` +
             `👛 <code>${address}</code>\n\n` +
-            `This group will now receive alerts for every trade.\n` +
+            `This group will now receive alerts for every trade.${evmNote}\n` +
             `Use <code>/unwatch ${address}</code> to stop.`,
+          { parse_mode: 'HTML' },
+        );
+      } else if (isEvm) {
+        await ctx.reply(
+          `✅ <b>Wallet Added</b>\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `👛 <a href="https://etherscan.io/address/${address}">${short}</a>\n` +
+            `<code>${address}</code>\n${evmNote}\n\n` +
+            `💡 Use /label to give this wallet a name.`,
           { parse_mode: 'HTML' },
         );
       } else {
