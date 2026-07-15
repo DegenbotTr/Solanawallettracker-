@@ -2,6 +2,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { bots } from "@/lib/bots";
 import { BotCard } from "./components/BotCard";
+import { HeroDemo } from "./components/HeroDemo";
 
 const COMMUNITY_URL = "https://t.me/Degenhubtrade";
 
@@ -30,11 +31,7 @@ export default function Home() {
 
         <div className="relative mx-auto max-w-6xl px-6 pt-28 pb-24 sm:pt-36 sm:pb-32">
           <div className="relative z-10 mx-auto max-w-3xl text-center">
-            <span className="inline-flex items-center gap-2 rounded-full border border-accent-2/40 bg-black/50 px-3 py-1 text-[11px] font-medium uppercase tracking-wider text-accent-2 backdrop-blur">
-              A growing collection of trading bots
-            </span>
-
-            <h1 className="mt-6 text-5xl font-semibold leading-[1.05] tracking-tight text-white drop-shadow-[0_2px_16px_rgba(0,0,0,0.8)] sm:text-6xl md:text-7xl">
+            <h1 className="text-5xl font-semibold leading-[1.05] tracking-tight text-white drop-shadow-[0_2px_16px_rgba(0,0,0,0.8)] sm:text-6xl md:text-7xl">
               Trading bots that
               <br />
               <span className="text-brand-gradient">move at degen speed.</span>
@@ -82,48 +79,9 @@ export default function Home() {
             </p>
           </div>
 
-          {/* Preview card */}
+          {/* Rotating demo — cycles through DM wallet alerts and group alpha */}
           <div className="relative z-10 mx-auto mt-16 max-w-2xl">
-            <div className="relative overflow-hidden rounded-2xl border border-border bg-panel/80 p-1 shadow-2xl backdrop-blur">
-              <div className="rounded-xl border border-border/70 bg-black/60 p-5">
-                <div className="flex items-center gap-2 border-b border-border/60 pb-3">
-                  <div className="flex gap-1.5">
-                    <span className="h-2.5 w-2.5 rounded-full bg-red-500/70" />
-                    <span className="h-2.5 w-2.5 rounded-full bg-yellow-500/70" />
-                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-500/70" />
-                  </div>
-                  <span className="ml-3 text-xs text-muted">@De1trackBot</span>
-                </div>
-                <div className="mt-4 space-y-3 font-mono text-[12px] leading-relaxed">
-                  <ChatLine role="you">/watch 7xKX...aB2v</ChatLine>
-                  <ChatLine role="bot">
-                    <span className="text-accent">Watching</span> 7xKX...aB2v.
-                    You&apos;ll get alerts for every trade over your min size.
-                  </ChatLine>
-                  <ChatLine role="bot" alert>
-                    <div className="text-emerald-300">◎ BUY detected</div>
-                    <div className="mt-1 text-zinc-400">
-                      <span className="text-white">7xKX...aB2v</span> bought{" "}
-                      <span className="text-white">1,240 BONK</span> for{" "}
-                      <span className="text-white">2.15 SOL</span>
-                    </div>
-                    <div className="text-zinc-500">≈ $312.40 • 2s ago</div>
-                  </ChatLine>
-                  <ChatLine role="you">0x95ad…c4ce</ChatLine>
-                  <ChatLine role="bot">
-                    <div className="text-white">🪙 SHIBA INU ($SHIB)</div>
-                    <div className="mt-1 text-zinc-400">
-                      MC <span className="text-white">$4.2B</span> · LP{" "}
-                      <span className="text-white">$12M</span> ·{" "}
-                      <span className="text-violet-300">⟠ Ethereum</span>
-                    </div>
-                    <div className="text-zinc-500">
-                      🔒 Honeypot: No · Tax 0/0 · Verified ✓
-                    </div>
-                  </ChatLine>
-                </div>
-              </div>
-            </div>
+            <HeroDemo />
           </div>
         </div>
       </section>
@@ -418,33 +376,6 @@ function ComingSoonCard({
       <p className="relative mt-2 text-sm leading-relaxed text-zinc-400">
         {description}
       </p>
-    </div>
-  );
-}
-
-function ChatLine({
-  role,
-  children,
-  alert,
-}: {
-  role: "you" | "bot";
-  children: React.ReactNode;
-  alert?: boolean;
-}) {
-  const isYou = role === "you";
-  return (
-    <div className={`flex ${isYou ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[85%] rounded-2xl px-3 py-2 ${
-          isYou
-            ? "bg-white/10 text-white"
-            : alert
-              ? "border border-emerald-500/30 bg-emerald-500/5 text-zinc-200"
-              : "bg-panel-2 text-zinc-200"
-        }`}
-      >
-        {children}
-      </div>
     </div>
   );
 }

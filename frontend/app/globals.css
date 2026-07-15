@@ -108,3 +108,18 @@ body {
 .marquee-track {
   animation: marquee 40s linear infinite;
 }
+
+@keyframes demo-fade {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.demo-fade {
+  animation: demo-fade 0.45s ease;
+}
