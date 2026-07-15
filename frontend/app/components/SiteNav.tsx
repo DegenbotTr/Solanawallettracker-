@@ -12,8 +12,9 @@ export function SiteNav() {
           <span className="text-sm font-semibold tracking-tight text-white">
             DegenHub
           </span>
-          <span className="hidden rounded-full border border-border bg-panel px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted sm:inline">
-            Home for Traders Bots
+          <span className="hidden items-center gap-1.5 rounded-full border border-accent-2/40 bg-panel px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider sm:inline-flex">
+            <span className="pulse-dot h-1.5 w-1.5 rounded-full bg-accent" />
+            <span className="badge-shimmer">Home for Traders Bots</span>
           </span>
         </Link>
 

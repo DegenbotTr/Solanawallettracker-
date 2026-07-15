@@ -3,6 +3,7 @@ import Image from "next/image";
 import { bots } from "@/lib/bots";
 import { BotCard } from "./components/BotCard";
 import { HeroDemo } from "./components/HeroDemo";
+import { ScrambleText } from "./components/ScrambleText";
 
 const COMMUNITY_URL = "https://t.me/Degenhubtrade";
 
@@ -32,9 +33,16 @@ export default function Home() {
         <div className="relative mx-auto max-w-6xl px-6 pt-28 pb-24 sm:pt-36 sm:pb-32">
           <div className="relative z-10 mx-auto max-w-3xl text-center">
             <h1 className="text-5xl font-semibold leading-[1.05] tracking-tight text-white drop-shadow-[0_2px_16px_rgba(0,0,0,0.8)] sm:text-6xl md:text-7xl">
-              Trading bots that
+              <ScrambleText phrases={["Trading bots that"]} />
               <br />
-              <span className="text-brand-gradient">move at degen speed.</span>
+              <ScrambleText
+                className="text-brand-gradient"
+                phrases={[
+                  "move at degen speed.",
+                  "scan every chain.",
+                  "never miss a call.",
+                ]}
+              />
             </h1>
 
             <p className="mx-auto mt-6 max-w-xl text-base leading-relaxed text-zinc-300 drop-shadow-[0_1px_8px_rgba(0,0,0,0.9)] sm:text-lg">

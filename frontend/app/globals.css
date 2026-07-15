@@ -109,6 +109,40 @@ body {
   animation: marquee 40s linear infinite;
 }
 
+/* Characters still "decrypting" in a ScrambleText — violet, overriding even
+   gradient-clipped parents via text-fill-color. */
+.scramble-pending {
+  color: rgb(153 69 255 / 0.75);
+  -webkit-text-fill-color: rgb(153 69 255 / 0.75);
+}
+
+/* Attention shimmer for the nav tagline pill — a light band sweeping through
+   brand colors across the text. */
+@keyframes badge-shimmer {
+  0% {
+    background-position: 200% center;
+  }
+  100% {
+    background-position: -200% center;
+  }
+}
+
+.badge-shimmer {
+  background: linear-gradient(
+    90deg,
+    #8a8a94 0%,
+    #ffffff 42%,
+    #14f195 50%,
+    #9945ff 58%,
+    #8a8a94 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: badge-shimmer 3s linear infinite;
+}
+
 @keyframes demo-fade {
   from {
     opacity: 0;
