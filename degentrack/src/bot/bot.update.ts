@@ -208,10 +208,10 @@ export class BotUpdate {
           `• <code>/unwatch &lt;address&gt;</code> — stop tracking\n` +
           `• <code>/list</code> — see all watched wallets\n\n` +
           `<b>Group alpha</b>\n` +
-          `• Paste any CA — I'll show token info and record who called it first\n` +
+          `• Paste any CA — <b>Solana</b> or <b>EVM</b> (ETH · BSC · Base · Arbitrum) — I'll show token info and record who called it first\n` +
           `• <code>/trending</code> — most-called tokens in this group\n` +
           `• <code>/leaderboard</code> — top callers by call performance\n\n` +
-          `⚠️ Solana only.`,
+          `⚠️ Real-time wallet alerts are Solana-only for now.`,
         { parse_mode: 'HTML' },
       );
       return;
@@ -249,7 +249,7 @@ export class BotUpdate {
         `/trending /leaderboard\n\n` +
         `<b>Settings</b>\n` +
         `/minsize /stats /menu\n\n` +
-        `💡 Paste any Solana token CA — or type <code>$SYMBOL</code> (e.g. <code>$BONK</code>) — to get a full info card.`,
+        `💡 Paste any token CA — Solana or EVM (ETH · BSC · Base · Arbitrum) — or type <code>$SYMBOL</code> (e.g. <code>$BONK</code>) — to get a full info card.`,
       { parse_mode: 'HTML' },
     );
   }
@@ -789,7 +789,7 @@ export class BotUpdate {
         `/trending /leaderboard\n\n` +
         `<b>Settings</b>\n` +
         `/minsize /stats /menu\n\n` +
-        `💡 Paste any Solana token CA — or type <code>$SYMBOL</code> (e.g. <code>$BONK</code>) — to get a full info card.`,
+        `💡 Paste any token CA — Solana or EVM (ETH · BSC · Base · Arbitrum) — or type <code>$SYMBOL</code> (e.g. <code>$BONK</code>) — to get a full info card.`,
       { parse_mode: 'HTML' },
     );
   }
@@ -992,6 +992,12 @@ export class BotUpdate {
     const action = pendingAction.get(chatId);
     if (!action) {
       const trimmed = text.trim();
+      // Auto-detect pasted EVM contract (0x + 40 hex) — ETH / BSC / Base /
+      // Arbitrum. The card resolves the actual chain live from DexScreener.
+      if (this.solanaService.isEvmAddress(trimmed)) {
+        await this.showTokenInfo(ctx, trimmed);
+        return;
+      }
       // Auto-detect pasted Solana address (base58, 32-44 chars, no spaces)
       if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
         // Skip if it's a watched wallet address — not a token
@@ -1384,6 +1390,9 @@ export class BotUpdate {
   }
 
   private async showTokenInfo(ctx: Context, mint: string): Promise<void> {
+    // Single normalization point — EVM CAs are lowercased here so every
+    // downstream lookup (first-caller, MC map) keys off the same string.
+    mint = this.solanaService.normalizeAddress(mint);
     const replyToId = (ctx.message as any)?.message_id;
     const loading = await ctx.reply('🔍 Fetching token info...');
     try {
@@ -1462,12 +1471,17 @@ export class BotUpdate {
     mint: string,
     opts: { recordCall: boolean },
   ): Promise<{ finalText: string; keyboard: any; imageUrl?: string }> {
-    const { text, imageUrl, symbol, name, price, marketCap } =
+    const { text, imageUrl, symbol, name, price, marketCap, chain } =
       await this.solanaService.getTokenInfo(mint);
 
     const keyboard = {
       inline_keyboard: [
-        ...this.solanaService.buildTradeButtons(mint),
+        ...this.solanaService.buildTradeButtons(
+          mint,
+          undefined,
+          undefined,
+          chain,
+        ),
         [{ text: '🔄 Refresh', callback_data: `refresh_token:${mint}` }],
       ],
     };

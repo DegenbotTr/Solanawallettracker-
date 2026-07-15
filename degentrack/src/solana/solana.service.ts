@@ -84,14 +84,11 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
     // Kick off peak-MC poller (fire-and-forget). First run is delayed a minute
     // so the app finishes booting before we start hitting external APIs.
-    this.peakPollTimer = setInterval(
-      () => {
-        this.pollTokenPeaks().catch((err) =>
-          this.logger.error(`Peak poll failed: ${err.message}`),
-        );
-      },
-      SolanaService.PEAK_POLL_INTERVAL_MS,
-    );
+    this.peakPollTimer = setInterval(() => {
+      this.pollTokenPeaks().catch((err) =>
+        this.logger.error(`Peak poll failed: ${err.message}`),
+      );
+    }, SolanaService.PEAK_POLL_INTERVAL_MS);
     setTimeout(
       () =>
         this.pollTokenPeaks().catch((err) =>
@@ -166,7 +163,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         });
       }
     }
-    this.logger.log(`Peak poll: ${mints.length} mints checked, ${updated} peaks updated`);
+    this.logger.log(
+      `Peak poll: ${mints.length} mints checked, ${updated} peaks updated`,
+    );
   }
   private async initWalletSubscription(address: string): Promise<number> {
     if (this.watchedWallets.has(address)) {
@@ -473,9 +472,74 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     return (
       `⛔ <b>That's not a Solana wallet</b>\n\n` +
       `Detected: <b>${detected}</b>\n\n` +
-      `This bot only supports <b>Solana</b> wallets.\n` +
+      `Real-time <b>wallet tracking</b> is Solana-only for now.\n` +
+      `(EVM token info cards work — just paste an <code>0x…</code> contract in a group.)\n\n` +
       `Solana addresses look like:\n<code>EizqmoCSovbTzuSnmxkdaJwLBBZgyB2GyjN3m3uJWXpZ</code>`
     );
+  }
+
+  // ─── EVM Multi-Chain Support (token info cards only) ─────────────────────────
+  //
+  // Token cards work on any chain DexScreener indexes. EVM addresses (0x…) are
+  // ambiguous across chains, so the *actual* chain is resolved from DexScreener
+  // at fetch time (see getTokenInfo) — this table only supplies the per-chain
+  // links/labels once we know which chain a token lives on.
+  private static readonly EVM_CHAINS: Record<
+    string,
+    {
+      name: string;
+      badge: string;
+      explorer: string;
+      bullxId: string;
+      gmgn?: string;
+      honeypot?: string;
+    }
+  > = {
+    ethereum: {
+      name: 'Ethereum',
+      badge: '⟠ Ethereum',
+      explorer: 'https://etherscan.io',
+      bullxId: '1',
+      gmgn: 'eth',
+      honeypot: 'ethereum',
+    },
+    bsc: {
+      name: 'BSC',
+      badge: '🟡 BSC',
+      explorer: 'https://bscscan.com',
+      bullxId: '56',
+      gmgn: 'bsc',
+      honeypot: 'bsc',
+    },
+    base: {
+      name: 'Base',
+      badge: '🔵 Base',
+      explorer: 'https://basescan.org',
+      bullxId: '8453',
+      gmgn: 'base',
+      honeypot: 'base',
+    },
+    arbitrum: {
+      name: 'Arbitrum',
+      badge: '🔷 Arbitrum',
+      explorer: 'https://arbiscan.io',
+      bullxId: '42161',
+    },
+  };
+
+  isEvmAddress(address: string): boolean {
+    return /^0x[a-fA-F0-9]{40}$/.test((address ?? '').trim());
+  }
+
+  /**
+   * Canonical form of an address for storage & equality. EVM addresses are
+   * case-insensitive, so we lowercase them — this keeps first-caller lookups
+   * and MC-map keys consistent no matter how a user typed/checksummed the CA.
+   * Solana (base58) is case-sensitive and returned untouched.
+   */
+  normalizeAddress(address: string): string {
+    const trimmed = (address ?? '').trim();
+    return this.isEvmAddress(trimmed) ? trimmed.toLowerCase() : trimmed;
   }
 
   // ─── Cached SOL Price ────────────────────────────────────────────────────────
@@ -531,6 +595,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     mint: string | null,
     signature?: string,
     walletAddress?: string,
+    chain: string = 'solana',
   ): { text: string; url: string }[][] {
     if (!mint) {
       const contextOnly: { text: string; url: string }[] = [];
@@ -546,6 +611,11 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         });
       return contextOnly.length ? [contextOnly] : [];
     }
+
+    // EVM tokens (ETH / BSC / Base / Arbitrum) get their own bot + research set;
+    // the Solana bots (Trojan/Photon) don't work cross-chain.
+    const evm = SolanaService.EVM_CHAINS[chain];
+    if (evm) return this.buildEvmTradeButtons(mint, chain, evm);
 
     const trojanRef = this.config.get<string>('TROJAN_REF', '');
     const bullxRef = this.config.get<string>('BULLX_REF', '');
@@ -585,6 +655,49 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         text: '👛 Wallet',
         url: `https://solscan.io/account/${walletAddress}`,
       });
+
+    return [tradeRow, researchRow];
+  }
+
+  private buildEvmTradeButtons(
+    mint: string,
+    chain: string,
+    evm: (typeof SolanaService.EVM_CHAINS)[string],
+  ): { text: string; url: string }[][] {
+    const bullxRef = this.config.get<string>('BULLX_REF', '');
+
+    // Maestro & Banana Gun are multi-chain EVM sniper bots; passing the contract
+    // as the /start payload opens each bot focused on this token (they
+    // auto-detect the chain). Canonical bot handles below.
+    const maestroUrl = `https://t.me/MaestroSniperBot?start=${mint}`;
+    const bananaUrl = `https://t.me/BananaGunSniper_bot?start=${mint}`;
+    const bullxUrl = bullxRef
+      ? `https://neo.bullx.io/terminal?chainId=${evm.bullxId}&address=${mint}&referralCode=${bullxRef}`
+      : `https://neo.bullx.io/terminal?chainId=${evm.bullxId}&address=${mint}`;
+
+    const tradeRow = [
+      { text: '🤖 Maestro', url: maestroUrl },
+      { text: '🍌 Banana', url: bananaUrl },
+      { text: '🐂 BullX', url: bullxUrl },
+    ];
+
+    const researchRow: { text: string; url: string }[] = [
+      { text: '📊 Chart', url: `https://dexscreener.com/${chain}/${mint}` },
+    ];
+    if (evm.gmgn)
+      researchRow.push({
+        text: '🧬 GMGN',
+        url: `https://gmgn.ai/${evm.gmgn}/token/${mint}`,
+      });
+    if (evm.honeypot)
+      researchRow.push({
+        text: '🍯 Honeypot',
+        url: `https://honeypot.is/${evm.honeypot}?address=${mint}`,
+      });
+    researchRow.push({
+      text: '🔎 Scan',
+      url: `${evm.explorer}/token/${mint}`,
+    });
 
     return [tradeRow, researchRow];
   }
@@ -1011,12 +1124,18 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     for (let i = 0; i < unique.length; i += CHUNK) {
       const slice = unique.slice(i, i + CHUNK);
       try {
+        // Chain-agnostic endpoint — returns pairs for these addresses across
+        // every chain (Solana + EVM), so mixed-chain call lists resolve in one
+        // request. `baseToken.address` is normalized to match how we store it.
         const r = await fetch(
-          `https://api.dexscreener.com/tokens/v1/solana/${slice.join(',')}`,
+          `https://api.dexscreener.com/latest/dex/tokens/${slice.join(',')}`,
         );
-        const pairs: any[] = await r.json();
-        for (const pair of pairs || []) {
-          const addr = pair?.baseToken?.address;
+        const data = await r.json();
+        const pairs: any[] = data?.pairs ?? [];
+        for (const pair of pairs) {
+          const addr = pair?.baseToken?.address
+            ? this.normalizeAddress(pair.baseToken.address)
+            : null;
           const fdv = pair?.fdv ?? 0;
           if (!addr) continue;
           // Keep the largest FDV across pools for the same mint.
@@ -1121,8 +1240,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       const stats = peakByMint.get(mint);
       if (!stats) continue;
       const peakGainPct =
-        ((Math.max(stats.peak, stats.last) - first.mcAtCall) /
-          first.mcAtCall) *
+        ((Math.max(stats.peak, stats.last) - first.mcAtCall) / first.mcAtCall) *
         100;
       const nowGainPct = ((stats.last - first.mcAtCall) / first.mcAtCall) * 100;
       const key = String(first.callerId);
@@ -1141,8 +1259,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     const results = Array.from(perCaller.values())
       .map((c) => {
         const calls = c.peakGains.length;
-        const avgPeakGainPct =
-          c.peakGains.reduce((s, g) => s + g, 0) / calls;
+        const avgPeakGainPct = c.peakGains.reduce((s, g) => s + g, 0) / calls;
         const avgNowGainPct = c.nowGains.reduce((s, g) => s + g, 0) / calls;
         const bestPeakGainPct = Math.max(...c.peakGains);
         const wins = c.peakGains.filter((g) => g >= 100).length;
@@ -1231,34 +1348,49 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     name: string;
     price: number;
     marketCap: number;
+    chain: string;
   }> {
-    // Fetch from DexScreener, Helius, and RugCheck in parallel
+    const isEvm = this.isEvmAddress(mint);
+
+    // DexScreener is cross-chain. Helius (getAsset) and RugCheck are Solana-only,
+    // so we skip them for EVM tokens and lean on DexScreener alone there.
     const [dsRes, heliusRes, rugRes] = await Promise.allSettled([
       fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`).then((r) =>
         r.json(),
       ),
-      fetch(`https://mainnet.helius-rpc.com/?api-key=${this.apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'getAsset',
-          params: { id: mint },
-        }),
-      }).then((r) => r.json()),
-      fetch(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`).then((r) =>
-        r.json(),
-      ),
+      isEvm
+        ? Promise.resolve(null)
+        : fetch(`https://mainnet.helius-rpc.com/?api-key=${this.apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'getAsset',
+              params: { id: mint },
+            }),
+          }).then((r) => r.json()),
+      isEvm
+        ? Promise.resolve(null)
+        : fetch(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`).then((r) =>
+            r.json(),
+          ),
     ]);
 
     const ds = dsRes.status === 'fulfilled' ? dsRes.value : null;
     const helius = heliusRes.status === 'fulfilled' ? heliusRes.value : null;
     const rug = rugRes.status === 'fulfilled' ? rugRes.value : null;
 
-    // Pick the most liquid pair from DexScreener
-    const pairs: any[] = ds?.pairs ?? [];
-    const pair = pairs.sort(
+    // Pick the most liquid pair. For an EVM address DexScreener may return pairs
+    // for the same token across several chains — restrict to the one the token
+    // actually trades on (whichever has the deepest liquidity).
+    const allPairs: any[] = ds?.pairs ?? [];
+    const pairs = isEvm
+      ? allPairs.filter((p: any) =>
+          SolanaService.EVM_CHAINS[p?.chainId ?? ''] ? true : false,
+        )
+      : allPairs.filter((p: any) => (p?.chainId ?? 'solana') === 'solana');
+    const pair = (pairs.length ? pairs : allPairs).sort(
       (a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0),
     )[0];
 
@@ -1270,8 +1402,12 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         name: '',
         price: 0,
         marketCap: 0,
+        chain: isEvm ? 'ethereum' : 'solana',
       };
     }
+
+    const chain: string = pair.chainId ?? (isEvm ? 'ethereum' : 'solana');
+    const evmMeta = SolanaService.EVM_CHAINS[chain];
 
     const token = pair.baseToken ?? {};
     const name = token.name || helius?.result?.content?.metadata?.name || '???';
@@ -1286,11 +1422,14 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     const dex = pair.dexId ?? '';
     const pairAddr = pair.pairAddress ?? '';
 
-    // Supply from Helius
+    // Supply from Helius (Solana). For EVM — or when Helius has no data — fall
+    // back to FDV/price, which equals total supply.
     const tokenInfo = helius?.result?.token_info;
     const supply: number = tokenInfo?.supply
       ? tokenInfo.supply / Math.pow(10, tokenInfo.decimals ?? 0)
-      : 0;
+      : price > 0 && mc > 0
+        ? mc / price
+        : 0;
 
     // Image
     const imageUrl: string | null =
@@ -1380,6 +1519,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
 
     const socialsLine = `\n🔗 <b>Socials</b>\n└ ${socialParts.join(' • ')}`;
 
+    const chainBadge = evmMeta ? evmMeta.badge : '◎ Solana';
+
     const text =
       `🪙 <b>${name}</b> (<b>$${symbol}</b>)\n` +
       `<code>${mint}</code>\n` +
@@ -1393,11 +1534,11 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
       `├ 1H     ${changeStr(priceChange1h)}\n` +
       `└ 24H    ${changeStr(priceChange24h)}\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
-      `🏦 DEX: <b>${dex.toUpperCase()}</b>` +
+      `🏦 DEX: <b>${dex.toUpperCase()}</b>  ·  ${chainBadge}` +
       socialsLine +
       securityLine;
 
-    return { text, imageUrl, symbol, name, price, marketCap: mc };
+    return { text, imageUrl, symbol, name, price, marketCap: mc, chain };
   }
 
   // ─── Price Check ─────────────────────────────────────────────────────────────
@@ -2052,7 +2193,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     };
 
     const priorLines = ctx.priorBuys
-      .map((b) => walletLine(b.address, b.label, b.totalUsd, timeAgo(b.timestamp)))
+      .map((b) =>
+        walletLine(b.address, b.label, b.totalUsd, timeAgo(b.timestamp)),
+      )
       .join('\n');
     const currentLine = walletLine(
       ctx.currentWallet,
@@ -2309,9 +2452,10 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      const note = solPrice > 0
-        ? '\n<i>USD values estimated using current SOL price — historical prices not looked up.</i>'
-        : '';
+      const note =
+        solPrice > 0
+          ? '\n<i>USD values estimated using current SOL price — historical prices not looked up.</i>'
+          : '';
       return {
         success: true,
         message: `Backfilled ${processed} trades${errors > 0 ? ` (${errors} errors)` : ''}${skippedTransfer > 0 ? `\nSkipped ${skippedTransfer} non-trade transfers.` : ''}${note}`,
@@ -2597,8 +2741,7 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         unrealized,
         total,
         totalBoughtUsd: e.totalBoughtUsd,
-        returnPct:
-          e.totalBoughtUsd > 0 ? (total / e.totalBoughtUsd) * 100 : 0,
+        returnPct: e.totalBoughtUsd > 0 ? (total / e.totalBoughtUsd) * 100 : 0,
         remaining,
         wins,
         losses,
@@ -2743,9 +2886,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
         }
 
         const totalPnl = realized + unrealized;
-        const totalPnlPct = totalBought > 0 ? (totalPnl / totalBought) * 100 : 0;
-        const winRate =
-          wins + losses > 0 ? (wins / (wins + losses)) * 100 : 0;
+        const totalPnlPct =
+          totalBought > 0 ? (totalPnl / totalBought) * 100 : 0;
+        const winRate = wins + losses > 0 ? (wins / (wins + losses)) * 100 : 0;
 
         return {
           address: r.address,
@@ -2795,7 +2938,9 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     if (watched.length === 0) return [];
 
     const addrs = watched.map((w) => w.walletAddress);
-    const labels = new Map(watched.map((w) => [w.walletAddress, w.label ?? '']));
+    const labels = new Map(
+      watched.map((w) => [w.walletAddress, w.label ?? '']),
+    );
 
     const since = new Date(Date.now() - hours * 60 * 60 * 1000);
     const trades = await this.prisma.trade.findMany({
@@ -2907,7 +3052,8 @@ export class SolanaService implements OnModuleInit, OnModuleDestroy {
     mintsWithLots.sort((a, b) => b.currentValue - a.currentValue);
 
     const totalUnrealized = totalValue - totalCost;
-    const totalReturnPct = totalCost > 0 ? (totalUnrealized / totalCost) * 100 : 0;
+    const totalReturnPct =
+      totalCost > 0 ? (totalUnrealized / totalCost) * 100 : 0;
     const sign = (n: number) => (n >= 0 ? '+' : '');
     const emoji = (n: number) => (n >= 0 ? '🟢' : '🔴');
     const short = `${address.slice(0, 6)}...${address.slice(-4)}`;
